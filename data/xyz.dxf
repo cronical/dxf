@@ -1,0 +1,318 @@
+  0
+SECTION
+  2
+HEADER
+  9
+$ACADVER
+  1
+AC1009
+  9
+$MEASUREMENT
+  70
+0
+  9
+$INSUNITS
+  70
+1
+  9
+$DIMTXT
+  40
+1.0
+  9
+$DIMASZ
+  40
+0.8
+  9
+$EXTMIN
+  10
+0.000000
+  20
+0.000000
+  9
+$EXTMAX
+  10
+240.000000
+  20
+151.000000
+  9
+$TEXTSTYLE
+  7
+STANDARD
+  0
+ENDSEC
+  0
+SECTION
+  2
+TABLES
+  0
+TABLE
+  2
+LTYPE
+  0
+LTYPE
+  2
+CONTINUOUS
+  70
+0
+  3
+Solid line
+  72
+65
+  73
+0
+  40
+0
+  0
+LTYPE
+  2
+DASHED
+  70
+0
+  3
+__ __ __ __ __ __ __ __ __ __ __ __ __ __ __
+  72
+65
+  73
+2
+  40
+0.15
+  49
+0.1
+  49
+-0.05
+  0
+LTYPE
+  2
+DOT
+  70
+0
+  3
+...............................................
+  72
+65
+  73
+2
+  40
+0.1
+  49
+0
+  49
+-0.05
+  0
+ENDTAB
+  0
+TABLE
+  2
+LAYER
+  70
+0
+  0
+LAYER
+  2
+XTRKCAD1
+  6
+CONTINUOUS
+  62
+7
+  70
+0
+  0
+LAYER
+  2
+XTRKCAD2
+  6
+CONTINUOUS
+  62
+7
+  70
+0
+  0
+LAYER
+  2
+XTRKCAD3
+  6
+CONTINUOUS
+  62
+7
+  70
+0
+  0
+LAYER
+  2
+XTRKCAD4
+  6
+CONTINUOUS
+  62
+7
+  70
+0
+  0
+LAYER
+  2
+XTRKCAD5
+  6
+CONTINUOUS
+  62
+7
+  70
+0
+  0
+LAYER
+  2
+XTRKCAD6
+  6
+CONTINUOUS
+  62
+7
+  70
+0
+  0
+LAYER
+  2
+XTRKCAD7
+  6
+CONTINUOUS
+  62
+7
+  70
+0
+  0
+LAYER
+  2
+XTRKCAD8
+  6
+CONTINUOUS
+  62
+7
+  70
+0
+  0
+LAYER
+  2
+XTRKCAD9
+  6
+CONTINUOUS
+  62
+7
+  70
+0
+  0
+LAYER
+  2
+XTRKCAD10
+  6
+CONTINUOUS
+  62
+7
+  70
+0
+  0
+ENDTAB
+  0
+ENDSEC
+  0
+SECTION
+  2
+ENTITIES
+  0
+LINE
+  8
+XTRKCAD3
+  10
+1.000000
+  20
+2.250000
+  11
+19.250000
+  21
+2.000000
+  6
+DASHED
+  0
+LINE
+  8
+XTRKCAD3
+  10
+1.004449
+  20
+2.574770
+  11
+19.254449
+  21
+2.324770
+  6
+CONTINUOUS
+  0
+LINE
+  8
+XTRKCAD3
+  10
+0.995551
+  20
+1.925230
+  11
+19.245551
+  21
+1.675230
+  6
+CONTINUOUS
+  0
+LINE
+  8
+XTRKCAD3
+  10
+1.008898
+  20
+2.899539
+  11
+0.991102
+  21
+1.600461
+  6
+CONTINUOUS
+  0
+LINE
+  8
+XTRKCAD3
+  10
+1.208879
+  20
+2.896800
+  11
+1.191083
+  21
+1.597721
+  6
+CONTINUOUS
+  0
+LINE
+  8
+XTRKCAD3
+  10
+19.241102
+  20
+1.350461
+  11
+19.258898
+  21
+2.649539
+  6
+CONTINUOUS
+  0
+LINE
+  8
+XTRKCAD3
+  10
+19.041121
+  20
+1.353200
+  11
+19.058917
+  21
+2.652279
+  6
+CONTINUOUS
+  0
+ENDSEC
+  0
+EOF
