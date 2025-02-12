@@ -1,7 +1,8 @@
 #!/usr/bin/env python
 import sys
 import ezdxf
-from ezdxf.math import ConstructionArc
+
+#from ezdxf.math import ConstructionArc
 
 try:
     doc = ezdxf.readfile("data/small.dxf")
@@ -13,7 +14,7 @@ except ezdxf.DXFStructureError:
     sys.exit(2)
 # helper function
 def process_entity(msp,e):
-    """Remove the continuous lines, leaving only the center line
+    """Remove the some of the lines
     """
     typ=e.dxf.linetype
 
@@ -28,10 +29,12 @@ def process_entity(msp,e):
 
     match typ:
         case "DASHED":
+
             pass
         case "CONTINUOUS":
             e.destroy() # this just marks for deletion until purge is called
             print ("\tdeleted")
+            pass
         case _:
             pass
 
@@ -45,7 +48,7 @@ for ix,e in enumerate(msp):
     else:
         print(e.dxftype())
 msp.purge()
-print (f"Reduced to {len(msp)} entities by taking only the center lines")
+print (f"Reduced to {len(msp)} entities")
 
 #create another line above each element on the z axis
 # base=list(msp)
