@@ -3,10 +3,10 @@ Run inside of Blender
 
 """
 from itertools import compress
-
 import os
+from math import dist
 import bpy
-from mathutils import Matrix
+from mathutils import Matrix, Vector
 import numpy as np
 
 
@@ -248,16 +248,19 @@ def extrude_to_height(obj:bpy.types.Object,vertices:bpy.types.MeshVertices,heigh
     panels_up(obj,vertices,height)
 
 def create_bezier(control_points: list):
-    """Set up a bezier curve - (no yet supporting s-curve)
-    control_points an ordered list of 4 x,y,z triplets 
+    """Set up a bezier curve - (not yet supporting s-curve)
+    control_points an ordered list of 4 x,y,z triplets in inches
     first and last are "anchor" points on the top of the level panels
     the middle two are the points where the incline stops (low,high)
 
     modified from: https://blender.stackexchange.com/questions/296531/script-to-import-coordinates-and-create-a-bezier-curve
     """
-
+    
+    scale=.0254 # convert to meters
+    assert len(control_points)==4,'Should have 4 control points'
+    cpv=[scale * Vector(cp) for cp in control_points]
     # create bezier curve and add enough control points to it
-    bpy.ops.curve.primitive_bezier_curve_add()
+    bpy.ops.curve.primitive_bezier_curve_add(enter_editmode=True)
     curve = bpy.context.active_object
     bez_points = curve.data.splines[0].bezier_points
 
@@ -266,16 +269,26 @@ def create_bezier(control_points: list):
 
     handle_types=[('VECTOR','VECTOR'),('VECTOR','ALIGNED'),('ALIGNED','VECTOR'),('VECTOR','VECTOR')]
     # set the locations of the points
-    for i in range(len(control_points)):        
-        bez_points[i].co = control_points[i]
-        ht=handle_types[i]
-        bez_points[i].handle_left_type  = ht[0]
-        bez_points[i].handle_right_type = ht[1]
+    for i,co in enumerate(cpv):        
+        bez_points[i].co = co
+    bpy.ops.curve.select_all(action='SELECT')
+    bpy.ops.curve.handle_type_set(type='VECTOR')
+    # set middle two to aligned here
+    bpy.ops.curve.select_all(action='DESELECT')
+    for i, bpt in enumerate(bez_points):
+        if i==1:
+            bpt.select_right_handle=True
+            bpy.ops.curve.handle_type_set(type='ALIGNED')
+            bpt.select_control_point=False
+        if i==2:
+            bpt.select_left_handle=True
+            bpy.ops.curve.handle_type_set(type='ALIGNED')
+            bpt.select_control_point=False
+
+    bpy.ops.object.mode_set(mode='OBJECT')
+    pass
                 
-        # just for illustration (screenshot),
-        # add your correct handle locations here
-        #bez_points[i].handle_left  = control_points[i]
-        #bez_points[i].handle_right = control_points[i]    
+ 
 
 class IMPORT_xtc(bpy.types.Operator):
     """Xtrackcad to 3D (.dxf, .csv)"""
@@ -316,7 +329,6 @@ class IMPORT_xtc(bpy.types.Operator):
         nl=list(zip(names,layers))
         nl=sorted(nl,key=lambda x: x[1],reverse=True)
         names=[x[0]for x in nl]
-        candidates={} # (x,y):(index,height) - to locate bezier points
 
         for name in names:
             obj = bpy.data.objects[name]
@@ -344,35 +356,46 @@ class IMPORT_xtc(bpy.types.Operator):
                         # there should a point at the same x,y from the level sections
                         level=bpy.data.objects[LAYER_TYPES_TO_XTC["level"]]
                         bz_points=[]
+                        tol=.001
                         for xy,height in heights.items():
                             xyz=(xy[0],xy[1],height)
-                            print(f"looking for {xyz} in edges in level layer")
+                            print(f"    looking for {xyz} in {len(level.data.edges)} edges in level layer")
+                            candidates=[] # for error reporting only
                             for edge in level.data.edges:
                                 vcs=[]
+                                near=[]
                                 for ev in edge.vertices:
                                     vc=tuple(vertex_coordinates(level.data.vertices[ev],level.matrix_world ))
                                     vcs.append(vc)
+                                    near.append(dist(xyz,vc)<tol)
                                 if vcs[0][2]!=vcs[1][2]: # not on same level
                                     continue
                                 if vcs[0][2]==0: # only consider the ones at non zero height
                                     continue
-                                if xyz in vcs:
+                                candidates+=vcs
+                                if any(near):
                                     # the following puts the incline layer points in the center
                                     # and the level points on the outside
-                                    bz=sorted(vcs,key=lambda x:x==xyz,reverse=bool(len(bz_points)))
-                                    bz_points.append(bz)
+                                    bz=sorted(vcs,key=lambda v:dist(v,xyz)<tol,reverse=bool(len(bz_points)))
+                                    bz_points+=bz
+                                    for bp in bz:
+                                        print (f"      {bp}")
                                     break # done, no more edges needed for this side
-                        print(f"    {len(bz_points)} Bezier points")
-                        for bp in bz_points:
-                            print (f"      {bp}")
+                        print(f"      {len(bz_points)} Bezier points")
                         if len(bz_points)!=4:
-                            raise ValueError("Could not create bezier points.  Need 4")
-                        bezier_controls[ix]=bz_points
-                                     
+                            print(f"Could not create bezier control.  Need 4 points but have {len(bz_points)}")
+                            print("Here the the ones that we considered")
+                            for candidate in candidates:
+                                print(f"  {candidate}")
+                        else:
+                            bezier_controls[ix]=bz_points
+        
+        for ix,bz_points in bezier_controls.items():
+            create_bezier(bz_points)
 
                             
 
-                pass
+        pass
 
         save_file(f"{DATA_FOLDER}script_generated.blend")
         return {'FINISHED'}
