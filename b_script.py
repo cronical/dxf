@@ -267,10 +267,12 @@ def create_bezier(control_points: list):
     # note: a created bezier curve has already 2 control points
     bez_points.add(len(control_points) - 2)
 
-    handle_types=[('VECTOR','VECTOR'),('VECTOR','ALIGNED'),('ALIGNED','VECTOR'),('VECTOR','VECTOR')]
     # set the locations of the points
     for i,co in enumerate(cpv):        
         bez_points[i].co = co
+
+    # setting of the handle types is done via ops calls so that
+    # the curves are redrawn.
     bpy.ops.curve.select_all(action='SELECT')
     bpy.ops.curve.handle_type_set(type='VECTOR')
     # set middle two to aligned here
