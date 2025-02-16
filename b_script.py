@@ -6,6 +6,7 @@ from itertools import compress
 import os
 from math import dist
 import bpy
+import bmesh
 from mathutils import Matrix, Vector
 import numpy as np
 
@@ -53,8 +54,36 @@ def get_z(vert:bpy.types.MeshVertex,elevations:np.array,matrix_world:Matrix)->fl
         case _:
             raise ValueError(f"{coords} found on more than 1 line in end points matrix")
 
+def separate_sections(obj,vertex_sets):
+    """Create a new mesh from the items in each vertex_set based on the coordinates.
+    Use the coordinates since the index will likely change based on this activity.
+    The new mesh will have the same name as the obj but with a suffix .001 etc attached.
+    Return dict with new mesh name as key and the coordinates as the values"""
+    bpy.ops.object.mode_set(mode='OBJECT')
+    known_meshes=set([o.name for o in bpy.context.scene.objects if o.type=='MESH'])
+    new_map={} 
+    for vertex_set in vertex_sets:
+        vertex_cos=[v[1] for v in vertex_set]
+        all_cos=[v.co / 0.0254 for v in obj.data.vertices]
+        for edge in obj.data.edges:
+            cos=[all_cos[v] for v in edge.vertices]
+            if (cos[0] in vertex_cos) or (
+                cos[1] in vertex_cos):
+                edge.select = True
+            else:
+                edge.select = False
+        bpy.ops.object.mode_set(mode='EDIT')
+        bpy.ops.mesh.separate() 
+        new_mesh_set=set([o.name for o in bpy.context.scene.objects if o.type=='MESH'])
+        new_mesh_name=list(new_mesh_set-known_meshes)[0]
+        known_meshes=new_mesh_set
+        new_map[new_mesh_name]=vertex_cos
+        bpy.ops.object.mode_set(mode='OBJECT')
+    return new_map
+
+
 def panels_up(obj,vertex_set,height):
-    "For the vertex set extrude all edges to height along z dimension"
+    """For the vertex set extrude all edges to height along z dimension"""
     bpy.ops.object.mode_set(mode='OBJECT') # oddly to me anyway
     scaled_height=height *.0254 # got to be a better way to scale
     vertex_indices=[v.index for v in vertex_set]
@@ -247,8 +276,89 @@ def extrude_to_height(obj:bpy.types.Object,vertices:bpy.types.MeshVertices,heigh
     height=max(heights.values())
     panels_up(obj,vertices,height)
 
+def normalize_normals():
+    """After the panels are up, some of them are facing the wrong way
+    This puts it to a majority vote and flips the ones that are in the minority.
+    Works on selected object, all faces.
+    Returns (flipped_count,total_count)
+    Derived frrom:
+    https://blender.stackexchange.com/questions/87106/python-find-faces-with-incorrect-normals-to-flip-and-flip-them/87113#87113
+    """
+    bpy.ops.object.mode_set(mode="OBJECT")
+
+    me=bpy.context.object.data
+    bm = bmesh.new()
+    bm.from_mesh(me)
+
+    # Reference selected face indices
+    bm.faces.ensure_lookup_table()
+    face_indexes = [ f.index for f in bm.faces ]
+    total_count=len(face_indexes)
+
+    # Calculate the average normal vector
+    avgNormal = Vector()
+    for i in face_indexes: 
+        avgNormal += bm.faces[i].normal
+    avgNormal = avgNormal / total_count
+
+    # Calculate the dot products between the average an each face normal
+    dots = [ avgNormal.dot( bm.faces[i].normal ) for i in face_indexes ]
+
+    # Reversed faces have a negative dot product value
+    reversedFaces = [ i for i, dot in zip( face_indexes, dots ) if dot < 0 ]
+    flipped_count=len(reversedFaces)
+
+    # Deselect all faces and (later) only select flipped faces as indication of change
+    for f in bm.faces: 
+        f.select = False
+    bm.select_flush( False )
+
+    for i in reversedFaces:
+        bm.faces[i].select = True
+        bm.faces[i].normal_flip()  # Flip normal
+
+    bm.select_flush( True )
+    bm.to_mesh(me)
+    me.update()
+    return (flipped_count,total_count)
+
+
+def polarity_changes():
+    """After the panels are up, some of them are facing the wrong way
+    Returns a list of indicators as to whether each face changed polarity
+    Works on selected object, all faces.
+    First item is always False, 
+    Derived frrom:
+    https://blender.stackexchange.com/questions/87106/python-find-faces-with-incorrect-normals-to-flip-and-flip-them/87113#87113
+    """
+    bpy.ops.object.mode_set(mode="OBJECT")
+
+    me=bpy.context.object.data
+    bm = bmesh.new()
+    bm.from_mesh(me)
+
+    # Reference selected face indices
+    bm.faces.ensure_lookup_table()
+    face_indexes = [ f.index for f in bm.faces ]
+
+    if len(face_indexes)==0:
+        return []
+    result=[False]
+
+    prior_normal=bm.faces[face_indexes[0]].normal    
+    # Compare successively using the dot product tecnique
+    for i in face_indexes: 
+        if i==0:
+            continue
+        this_normal = bm.faces[i].normal
+
+        # Calculate the dot products between the this and prior face normal
+        dot =  prior_normal.dot(this_normal) 
+        result.append(dot<0) # Reversed faces have a negative dot product value
+    return result
+
 def create_bezier(control_points: list):
-    """Set up a bezier curve - (not yet supporting s-curve)
+    """Set up a bezier curve
     control_points an ordered list of 4 x,y,z triplets in inches
     first and last are "anchor" points on the top of the level panels
     the middle two are the points where the incline stops (low,high)
@@ -290,7 +400,31 @@ def create_bezier(control_points: list):
     bpy.ops.object.mode_set(mode='OBJECT')
     pass
                 
- 
+def set_trimmer():
+    """Turn the bezier curves into a 3d block than can be used to trim the
+    roadbed along a grade
+    """
+    for obj in bpy.data.objects:
+        if obj.name.startswith("Bézier"):
+            bpy.ops.object.select_all(action='DESELECT')
+            obj.select_set(True)
+            bpy.context.view_layer.objects.active = obj
+            print(f"Selected and active: {obj.name}")   
+            bpy.ops.object.mode_set(mode='EDIT')
+            bpy.ops.mesh.select_all(action='SELECT')
+            bpy.ops.mesh.extrude_edges_move(TRANSFORM_OT_translate={"value":(0,0,.0254)}) # assume 1" is enough
+            bpy.ops.object.mode_set(mode='OBJECT')
+            # fc,tc=normalize_normals()
+            # print(f"Flipped {fc} normals out of {tc}")
+            bpy.ops.object.modifier_add(type='SOLIDIFY')
+            bpy.context.object.modifiers["Solidify"].solidify_mode="NON_MANIFOLD" # i.e. complex
+            bpy.context.object.modifiers["Solidify"].thickness = 2*.0254
+            bpy.context.object.modifiers["Solidify"].offset = 0
+            bpy.ops.object.modifier_apply(modifier="Solidify")
+
+def meshes_of_type(mesh_type):
+    """Given a type of level or inclined, return list of mesh names"""
+    return [o.name for o in bpy.context.scene.objects if o.name.startswith(LAYER_TYPES_TO_XTC[mesh_type])]
 
 class IMPORT_xtc(bpy.types.Operator):
     """Xtrackcad to 3D (.dxf, .csv)"""
@@ -322,7 +456,7 @@ class IMPORT_xtc(bpy.types.Operator):
         convert_to_meshes()
 
         # to determine the bezier points
-        bezier_controls={} # key is section number of inclined layer, values is ordered list of points
+        bezier_controls=[] # each values= is an ordered list of points
         
 
         # set up to do level layer before inclined to help get bezier points
@@ -332,42 +466,42 @@ class IMPORT_xtc(bpy.types.Operator):
         nl=sorted(nl,key=lambda x: x[1],reverse=True)
         names=[x[0]for x in nl]
 
-        for name in names:
-            obj = bpy.data.objects[name]
-            sections=cluster_vertices(obj)
+        for name in names: #level then inclined
             layer=XTC_LAYER_TYPES[name]
             print(f"Starting layer: {layer}")
+            obj = bpy.data.objects[name]
+            sections=cluster_vertices(obj)
+            sections=separate_sections(obj,sections)
 
-
-            for ix,section in enumerate(sections):
-                # section is index,(x,y,z) of all points on z=0 plane for this section
-                print (f"  Starting section {ix}")
-                section_verts=[obj.data.vertices[x[0]]for x in section] # use index to get actual vertices
+            for mesh_name,section in sections.items():
+                # section is mesh_name,(x,y,z) of all points on z=0 plane for this section
+                obj=bpy.data.objects[mesh_name]
+                all_cos=[v.co / .0254 for v in obj.data.vertices]
+                if len(all_cos)==0: # the original mesh now has 0 elements.
+                    continue
+                print (f"  Starting section {mesh_name}")
+                section_verts=[obj.data.vertices[all_cos.index(co) ]for co in section] 
                 heights=height_for_vertex_set(section_verts,elevations,obj.matrix_world)
                 extrude_to_height(obj,section_verts,heights,layer)
-                match layer:
-                    case 'level':
-                        pass
-                        # h=[(max(heights.values()),ix)]*len(section) # replicate the height value and section index
-                        # xy=[]
-                        # for s in section:
-                        #     x,y,_=s[1]
-                        #     xy.append((x,y))
-                        # candidates.update(dict(zip(xy,h))) # when level done will hold all coordinates
-                    case 'inclined':
-                        # there should a point at the same x,y from the level sections
-                        level=bpy.data.objects[LAYER_TYPES_TO_XTC["level"]]
-                        bz_points=[]
-                        tol=.001
-                        for xy,height in heights.items():
-                            xyz=(xy[0],xy[1],height)
-                            print(f"    looking for {xyz} in {len(level.data.edges)} edges in level layer")
-                            candidates=[] # for error reporting only
-                            for edge in level.data.edges:
+                # for inclined create a bezier curve.  For that we need heights from the 
+                # adjoining level sections.
+                if layer =='inclined':
+                    # there should a point at the same x,y in one of the level sections
+                    bz_points=[]
+                    tol=.001
+                    for xy,height in heights.items():
+                        xyz=(xy[0],xy[1],height)
+                        print(f"    looking for {xyz} in level meshes")
+                        candidates=[] # for error reporting only
+                        for mesh_name in meshes_of_type("level"):
+                            mesh=bpy.data.objects[mesh_name]
+                            print(f"      {len(mesh.data.edges)} edges in {mesh_name}")
+                            bz=[]
+                            for edge in mesh.data.edges:
                                 vcs=[]
                                 near=[]
                                 for ev in edge.vertices:
-                                    vc=tuple(vertex_coordinates(level.data.vertices[ev],level.matrix_world ))
+                                    vc=tuple(vertex_coordinates(mesh.data.vertices[ev],mesh.matrix_world ))
                                     vcs.append(vc)
                                     near.append(dist(xyz,vc)<tol)
                                 if vcs[0][2]!=vcs[1][2]: # not on same level
@@ -375,27 +509,69 @@ class IMPORT_xtc(bpy.types.Operator):
                                 if vcs[0][2]==0: # only consider the ones at non zero height
                                     continue
                                 candidates+=vcs
-                                if any(near):
+                                if any(near): # if either edge vertex is near enough then both are part of bezier 
                                     # the following puts the incline layer points in the center
                                     # and the level points on the outside
                                     bz=sorted(vcs,key=lambda v:dist(v,xyz)<tol,reverse=bool(len(bz_points)))
                                     bz_points+=bz
                                     for bp in bz:
-                                        print (f"      {bp}")
-                                    break # done, no more edges needed for this side
-                        print(f"      {len(bz_points)} Bezier points")
-                        if len(bz_points)!=4:
-                            print(f"Could not create bezier control.  Need 4 points but have {len(bz_points)}")
-                            print("Here the the ones that we considered")
-                            for candidate in candidates:
-                                print(f"  {candidate}")
-                        else:
-                            bezier_controls[ix]=bz_points
+                                        print (f"        {bp}")
+                                    break # done, no more edges needed for this side of the bezier curve
+                            print(f"      {len(bz_points)} Bezier points")
+                            if len(bz)==2: # this side of the curve is satisfied by the most recent mesh
+                                break
+                    if len(bz_points)!=4: # all meshes used up and we still don't have a match
+                        print(f"Could not create bezier control.  Need 4 points but have {len(bz_points)}")
+                        print("Here the the ones that we considered")
+                        for candidate in candidates:
+                            print(f"  {candidate}")
+                    else:
+                        bezier_controls.append(bz_points)
         
-        for ix,bz_points in bezier_controls.items():
+        for bz_points in bezier_controls:
             create_bezier(bz_points)
 
-                            
+        convert_to_meshes() # the beziers this time
+        set_trimmer()
+
+        # solidify the ramps and the levels
+        layers=["inclined","level"]
+        for layer in layers:
+            for name in meshes_of_type(layer):
+                obj=bpy.data.objects[name]
+                obj.select_set(True)
+                print(f"Selected: {obj.name}")   
+                # fc,tc=normalize_normals()
+                # print(f"Flipped {fc} normals out of {tc}")            
+                bpy.context.view_layer.objects.active = obj
+                bpy.ops.object.modifier_add(type='SOLIDIFY')
+                bpy.context.object.modifiers["Solidify"].solidify_mode="NON_MANIFOLD" # i.e. complex
+                bpy.context.object.modifiers["Solidify"].thickness = .9375*.0254
+                bpy.context.object.modifiers["Solidify"].offset = 0
+                bpy.ops.object.modifier_apply(modifier="Solidify")
+
+        # do the trim and discard the trim tools
+        trimmers=[]
+        print ("Trimmers will be: ")
+        for obj in bpy.data.objects:
+            if obj.name.startswith("Bézier"):
+                trimmers.append(obj.name)
+                print (f"{obj.name}")
+        
+        for name in meshes_of_type("inclined"):
+            obj=bpy.data.objects[name]
+            for trimmer in trimmers:
+                if True: #trimmer.split('.')[-1]=="009":
+                    bpy.ops.object.select_all(action='DESELECT')
+                    obj.select_set(True)
+                    bpy.context.view_layer.objects.active = obj
+                    bpy.ops.object.modifier_add(type='BOOLEAN')
+                    mname=obj.modifiers[-1].name
+                    bpy.context.object.modifiers[mname].object=bpy.data.objects[trimmer] 
+                    bpy.context.object.modifiers[mname].operation = "DIFFERENCE"
+                    bpy.context.object.modifiers[mname].use_self=True
+                    bpy.ops.object.modifier_apply(modifier=mname)
+
 
         pass
 
