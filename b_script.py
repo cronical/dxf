@@ -21,7 +21,8 @@ bl_info = {
     "category" : "Import-Export"
 }
 
-__version__ = '.'.join([str(s) for s in bl_info['version']])
+__version__ = '.'.join([str(s) for s in 
+                        bl_info['version']])
 
 XTC_LAYER_TYPES={"XTRKCAD3_curve_":"level","XTRKCAD17_curve_":"inclined"}
 LAYER_TYPES_TO_XTC={v: k for k, v in XTC_LAYER_TYPES.items()}
@@ -62,39 +63,45 @@ def separate_sections(obj,vertex_sets):
     bpy.ops.object.mode_set(mode='OBJECT')
     known_meshes=set([o.name for o in bpy.context.scene.objects if o.type=='MESH'])
     new_map={} 
-    for vertex_set in vertex_sets:
+    for vx,vertex_set in enumerate(vertex_sets): # vx for debugging
         vertex_cos=[v[1] for v in vertex_set]
         all_cos=[v.co / 0.0254 for v in obj.data.vertices]
-        for edge in obj.data.edges:
+        print (f"    {obj.name} has {len(obj.data.edges)} edges")
+        for ex,edge in enumerate(obj.data.edges): # ex for debugging
             cos=[all_cos[v] for v in edge.vertices]
-            if (cos[0] in vertex_cos) or (
-                cos[1] in vertex_cos):
+
+            if nearly_in(cos[0],vertex_cos) or nearly_in(cos[1],vertex_cos):
                 edge.select = True
+                print(f"      {cos} selected")
             else:
                 edge.select = False
+                print(f"      {cos} rejected")
         bpy.ops.object.mode_set(mode='EDIT')
         bpy.ops.mesh.separate() 
         new_mesh_set=set([o.name for o in bpy.context.scene.objects if o.type=='MESH'])
         new_mesh_name=list(new_mesh_set-known_meshes)[0]
         known_meshes=new_mesh_set
+        print (f"    -- selected vertices moved to {new_mesh_name}")
         new_map[new_mesh_name]=vertex_cos
         bpy.ops.object.mode_set(mode='OBJECT')
     return new_map
 
+def nearly_in(coord:Vector,search_in):
+    """ Drop in replacement for 'in'. Returns True if coord is in set of search_in coordinates
+    Considers only x,y (not z)"""
+    all_coords=np.array([],dtype=complex)
+    c=[complex(a.x,a.y) for a in search_in]
+    all_coords=np.concatenate((all_coords,c))
+    c=complex(coord.x,coord.y)
+    sel=np.isclose(all_coords,c,atol=0.01)
+    return any(sel)
 
-def panels_up(obj,vertex_set,height):
-    """For the vertex set extrude all edges to height along z dimension"""
-    bpy.ops.object.mode_set(mode='OBJECT') # oddly to me anyway
+def panels_up(obj,height):
+    """Extrude all edges to height along z dimension"""
+    bpy.ops.object.mode_set(mode='OBJECT') 
     scaled_height=height *.0254 # got to be a better way to scale
-    vertex_indices=[v.index for v in vertex_set]
-
     for edge in obj.data.edges:
-        ev=edge.vertices
-        if (ev[0] in vertex_indices) or (
-            ev[1] in vertex_indices):
-            edge.select = True
-        else:
-            edge.select = False
+        edge.select = True
     bpy.ops.object.mode_set(mode='EDIT')
     bpy.ops.mesh.extrude_edges_move(TRANSFORM_OT_translate={"value":(0,0,scaled_height)}) 
     bpy.ops.mesh.select_all(action='DESELECT')
@@ -160,7 +167,6 @@ def cluster_vertices(obj):
     mesh = obj.data
     matrix=obj.matrix_world
     all_vertices=mesh.vertices
-    #check=[vertex_coordinates(v,matrix) for v in all_vertices]
     bpy.ops.object.mode_set(mode='OBJECT')
     sections=[]
 
@@ -263,9 +269,8 @@ def height_for_vertex_set(vertices:bpy.types.MeshVertices,elevations:np.array,ma
 
     return found
 
-def extrude_to_height(obj:bpy.types.Object,vertices:bpy.types.MeshVertices,heights:dict,layer:str):
-    """Find edges that connect vertices and extrude to the largest height given along the z dimension.
-    Vertices are expected to be in the object given.
+def extrude_to_height(obj:bpy.types.Object,heights:dict,layer:str):
+    """Extrude edges of obj to the largest height given along the z dimension.
     layer is either 'level' or 'inclined' 
     """
     hv=list(set(heights.values()))
@@ -274,57 +279,11 @@ def extrude_to_height(obj:bpy.types.Object,vertices:bpy.types.MeshVertices,heigh
     if rqd!=cnt:
         raise ValueError(f"{layer} object {obj.name} does not have exactly {rqd} height(s): {heights.values()}")
     height=max(heights.values())
-    panels_up(obj,vertices,height)
-
-def normalize_normals():
-    """After the panels are up, some of them are facing the wrong way
-    This puts it to a majority vote and flips the ones that are in the minority.
-    Works on selected object, all faces.
-    Returns (flipped_count,total_count)
-    Derived frrom:
-    https://blender.stackexchange.com/questions/87106/python-find-faces-with-incorrect-normals-to-flip-and-flip-them/87113#87113
-    """
-    bpy.ops.object.mode_set(mode="OBJECT")
-
-    me=bpy.context.object.data
-    bm = bmesh.new()
-    bm.from_mesh(me)
-
-    # Reference selected face indices
-    bm.faces.ensure_lookup_table()
-    face_indexes = [ f.index for f in bm.faces ]
-    total_count=len(face_indexes)
-
-    # Calculate the average normal vector
-    avgNormal = Vector()
-    for i in face_indexes: 
-        avgNormal += bm.faces[i].normal
-    avgNormal = avgNormal / total_count
-
-    # Calculate the dot products between the average an each face normal
-    dots = [ avgNormal.dot( bm.faces[i].normal ) for i in face_indexes ]
-
-    # Reversed faces have a negative dot product value
-    reversedFaces = [ i for i, dot in zip( face_indexes, dots ) if dot < 0 ]
-    flipped_count=len(reversedFaces)
-
-    # Deselect all faces and (later) only select flipped faces as indication of change
-    for f in bm.faces: 
-        f.select = False
-    bm.select_flush( False )
-
-    for i in reversedFaces:
-        bm.faces[i].select = True
-        bm.faces[i].normal_flip()  # Flip normal
-
-    bm.select_flush( True )
-    bm.to_mesh(me)
-    me.update()
-    return (flipped_count,total_count)
-
+    panels_up(obj,height)
 
 def polarity_changes():
-    """After the panels are up, some of them are facing the wrong way
+    """ ** probably not needed **
+    After the panels are up, some of them are facing the wrong way
     Returns a list of indicators as to whether each face changed polarity
     Works on selected object, all faces.
     First item is always False, 
@@ -414,8 +373,6 @@ def set_trimmer():
             bpy.ops.mesh.select_all(action='SELECT')
             bpy.ops.mesh.extrude_edges_move(TRANSFORM_OT_translate={"value":(0,0,.0254)}) # assume 1" is enough
             bpy.ops.object.mode_set(mode='OBJECT')
-            # fc,tc=normalize_normals()
-            # print(f"Flipped {fc} normals out of {tc}")
             bpy.ops.object.modifier_add(type='SOLIDIFY')
             bpy.context.object.modifiers["Solidify"].solidify_mode="NON_MANIFOLD" # i.e. complex
             bpy.context.object.modifiers["Solidify"].thickness = 2*.0254
@@ -425,6 +382,15 @@ def set_trimmer():
 def meshes_of_type(mesh_type):
     """Given a type of level or inclined, return list of mesh names"""
     return [o.name for o in bpy.context.scene.objects if o.name.startswith(LAYER_TYPES_TO_XTC[mesh_type])]
+
+def delete_objects_by_name(object_names):
+    """Delete the objects in the list
+    """
+    bpy.ops.object.select_all(action='DESELECT')
+    for obj in bpy.data.objects:
+        if obj.name in object_names:
+            obj.select_set(True)
+    bpy.ops.object.delete(use_global=True)              
 
 class IMPORT_xtc(bpy.types.Operator):
     """Xtrackcad to 3D (.dxf, .csv)"""
@@ -470,9 +436,9 @@ class IMPORT_xtc(bpy.types.Operator):
             layer=XTC_LAYER_TYPES[name]
             print(f"Starting layer: {layer}")
             obj = bpy.data.objects[name]
-            sections=cluster_vertices(obj)
-            sections=separate_sections(obj,sections)
-
+            clusters=cluster_vertices(obj)
+            sections=separate_sections(obj,clusters)
+            
             for mesh_name,section in sections.items():
                 # section is mesh_name,(x,y,z) of all points on z=0 plane for this section
                 obj=bpy.data.objects[mesh_name]
@@ -482,7 +448,7 @@ class IMPORT_xtc(bpy.types.Operator):
                 print (f"  Starting section {mesh_name}")
                 section_verts=[obj.data.vertices[all_cos.index(co) ]for co in section] 
                 heights=height_for_vertex_set(section_verts,elevations,obj.matrix_world)
-                extrude_to_height(obj,section_verts,heights,layer)
+                extrude_to_height(obj,heights,layer)
                 # for inclined create a bezier curve.  For that we need heights from the 
                 # adjoining level sections.
                 if layer =='inclined':
@@ -541,8 +507,6 @@ class IMPORT_xtc(bpy.types.Operator):
                 obj=bpy.data.objects[name]
                 obj.select_set(True)
                 print(f"Selected: {obj.name}")   
-                # fc,tc=normalize_normals()
-                # print(f"Flipped {fc} normals out of {tc}")            
                 bpy.context.view_layer.objects.active = obj
                 bpy.ops.object.modifier_add(type='SOLIDIFY')
                 bpy.context.object.modifiers["Solidify"].solidify_mode="NON_MANIFOLD" # i.e. complex
@@ -561,17 +525,17 @@ class IMPORT_xtc(bpy.types.Operator):
         for name in meshes_of_type("inclined"):
             obj=bpy.data.objects[name]
             for trimmer in trimmers:
-                if True: #trimmer.split('.')[-1]=="009":
-                    bpy.ops.object.select_all(action='DESELECT')
-                    obj.select_set(True)
-                    bpy.context.view_layer.objects.active = obj
-                    bpy.ops.object.modifier_add(type='BOOLEAN')
-                    mname=obj.modifiers[-1].name
-                    bpy.context.object.modifiers[mname].object=bpy.data.objects[trimmer] 
-                    bpy.context.object.modifiers[mname].operation = "DIFFERENCE"
-                    bpy.context.object.modifiers[mname].use_self=True
-                    bpy.ops.object.modifier_apply(modifier=mname)
+                bpy.ops.object.select_all(action='DESELECT')
+                obj.select_set(True)
+                bpy.context.view_layer.objects.active = obj
+                bpy.ops.object.modifier_add(type='BOOLEAN')
+                mname=obj.modifiers[-1].name
+                bpy.context.object.modifiers[mname].object=bpy.data.objects[trimmer] 
+                bpy.context.object.modifiers[mname].operation = "DIFFERENCE"
+                bpy.context.object.modifiers[mname].use_self=True
+                bpy.ops.object.modifier_apply(modifier=mname)
 
+        delete_objects_by_name(trimmers)             
 
         pass
 
