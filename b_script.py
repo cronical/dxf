@@ -307,6 +307,7 @@ def extrude_to_height(obj:bpy.types.Object,heights:dict,layer:str):
         raise ValueError(f"{layer} object {obj.name} does not have exactly {rqd} height(s): {heights.values()}")
     height=max(heights.values())
     panels_up(obj,height)
+
 def show_face(face,indent=None):
     """Show vertices for purpose of debugging. 
     """
@@ -314,6 +315,18 @@ def show_face(face,indent=None):
         msg=(' '*indent)
         points=[]
         for v in face.verts:
+            inches=tuple(v.co / SCALE)
+            inches=tuple((round(a,6) for a in inches))
+            points+=[format(f"{inches}")]
+        print(msg+', '.join(points))
+
+def show_edge(edge,indent=None):
+    """Show vertices for purpose of debugging. 
+    """
+    if indent:
+        msg=(' '*indent)
+        points=[]
+        for v in edge.verts:
             inches=tuple(v.co / SCALE)
             inches=tuple((round(a,6) for a in inches))
             points+=[format(f"{inches}")]
@@ -328,6 +341,15 @@ def is_face_on_top(face):
         nz+=int(v.co.z>0)
     return nz==len(face.verts)
 
+def is_edge_on_top(edge):
+    """Return true if all vertices on a edge are non zero
+    all non-zero means its a edge on top.
+    """
+    nz=0
+    for v in edge.verts:
+        nz+=int(v.co.z>0)
+    return nz==len(edge.verts)
+
 def bevel(obj,center_normals:np.array,center_xy_coords:np.array):
     """ Bevel the top outside edges.
     """
@@ -336,50 +358,99 @@ def bevel(obj,center_normals:np.array,center_xy_coords:np.array):
     tol=.001
     bm = bmesh.new()
     bm.from_mesh(obj.data)
-    bm.faces.ensure_lookup_table()
+    bm.edges.ensure_lookup_table()
+    bm.verts.ensure_lookup_table()
     print(f"Finding edges to bevel for {obj.name}")
-    print(f"  There are are {len(bm.faces)} faces")
-    edges_to_select=[]
-    for face in bm.faces:
-        if is_face_on_top(face):
-            print ("    Top face found:")
-            show_face(face,indent=4)
-            for edge in face.edges:
-                print (f"      Edge: {edge.index}")
-                edge_faces=edge.link_faces
-                for ef in edge_faces:
-                    if ef.index==face.index:
-                        continue
-                    if is_face_on_top(ef):
-                        continue
-                    print(f"        Face {ef.index} is vertical")
-                    if len(ef.verts)!=4:
-                        print(f"        has {len(ef.verts)} vertices - skipping")
-                        continue
-                    # eliminate crossing faces
-                    top_cos=[]
-                    for v in ef.verts:
-                        if v.co.z >0:
-                            top_cos.append(v.co / SCALE)
-                    cross_center=False
-                    for pole_bot in center_xy_coords:
-                        height=1+max([co.z for co in top_cos])
-                        pole_top =Vector((pole_bot.x,pole_bot.y,height))
-                        intersect=intersect_line_line(top_cos[0],top_cos[1],pole_bot,pole_top)
-                        if intersect is None:# should never be colinear and thus never None
-                            debugpy.breakpoint()
-                            pass
-                        d=dist(intersect[0],intersect[1])
-                        if d<tol: 
-                            print(f"        Face {ef.index} crossses center")
-                            cross_center=True
-                            break
-                        else:
-                            continue
-                    if cross_center:
-                        continue # go on to next edge face
-                    edges_to_select.append(edge.index)
-                    print ("         Edge selected")
+    print(f"  There are are {len(bm.edges)} edges")
+    edges_to_select=set()
+    v2e_map={} # key index of vertex, values is list of up to 3 edge indices
+    for edge in bm.edges:
+        if is_edge_on_top(edge):
+            print ("    Top edge found:")
+            show_edge(edge,indent=4)
+            print (f"      Edge: {edge.index}")
+            # eliminate crossing edges
+            top_cos=[]
+            for v in edge.verts:
+                top_cos.append(v.co / SCALE)
+            if dist(top_cos[0],top_cos[1])<tol: # bizzarely close edges seen which caused intersect None
+                continue # just ignore
+
+            # intercept method - works for level areas and the ends of the inclined ares
+            cross_center=False
+            for pole_bot in center_xy_coords:
+                height=1+max([co.z for co in top_cos])
+                pole_top =Vector((pole_bot.x,pole_bot.y,height))
+                intersect=intersect_line_line(top_cos[0],top_cos[1],pole_bot,pole_top)
+                if intersect is None:# should never be colinear and thus never None
+                    debugpy.breakpoint()
+                    pass
+                d=dist(intersect[0],intersect[1])
+                if d<tol: 
+                    print(f"        Edge {edge.index} crossses center")
+                    cross_center=True
+                    break
+                else:
+                    continue
+            if cross_center:
+                continue # go on to next edge
+            edges_to_select.add(edge.index)
+            for vert in edge.verts:
+                if vert.index in v2e_map:
+                    v2e_map[vert.index].append(edge.index)
+                else:
+                    v2e_map[vert.index]=[edge.index]
+            print ("         Edge tentatively selected")
+
+    # remove the crossing edges using dot product
+    # this gets the ones created by the bezier curves
+    ignore_vix=[]
+    for vix,edges in v2e_map.items():
+        if vix in ignore_vix: # way to ignore other side of deleted edges
+            continue
+        if len(edges)!=3:
+            continue
+        shared_co=(bm.verts[vix].co /SCALE).freeze()
+        vectors=[]
+        print("Edges")
+        for ix in edges: # convert the edges to vectors
+            edge=bm.edges[ix]
+            # remove the common point all are direction from (0,0,0)
+            both_cos=[(v.co / SCALE).freeze() for v in edge.verts]            
+            print(f"{ix}: {both_cos}")
+            other_co=list(set(both_cos)-{shared_co})[0] # the coordinates of the non-common point
+            length=dist(shared_co,other_co) # used to scale to get unit vectors
+            vector=other_co-shared_co # center at (0,0,0)
+            vector=vector /length # unit vector needed so dot product works right            
+            vectors.append(vector)
+        print("Vectors")
+        for v in vectors:
+            print(v)
+        pairs=(0,1),(0,2),(1,2) # the three possible pairings
+        dp=[]
+        for pair in pairs:
+            dp.append(vectors[pair[0]] @ vectors[pair[1]]) # @ is python for dot product 
+        print ("Dot products by pair")
+
+        # make a histogram to count the times each edge is a near perpendicular
+        # the one with 2 will be the crossing edge
+        hist={0:0,1:0,2:0}
+        for pr,d in zip(pairs,dp):
+            print (pr,d)
+            if abs(d)<.02: # tolerance determined empirically.  Saw one just over .01
+                for edge_set_ix in pr:
+                    hist[edge_set_ix]+=1
+        print(hist)
+        for edge_set_ix,cnt in hist.items():
+            if cnt==2:
+                to_remove_ix=edges[edge_set_ix]
+                edges_to_select.remove(to_remove_ix)
+                # other side of crossing can be removed to prevent doing it again on the other side
+                edge=bm.edges[to_remove_ix]
+                for v in edge.verts: # might as well remove both sides
+                    ignore_vix.append(v.index)
+                print(f"Edge set item {edge_set_ix} with index {to_remove_ix} removed.")
+
 
     bpy.ops.object.mode_set(mode="EDIT")
     bpy.ops.mesh.select_mode(type='FACE')
@@ -392,13 +463,13 @@ def bevel(obj,center_normals:np.array,center_xy_coords:np.array):
             n+=1
     print(f"       {n} edges selected")
     bpy.ops.object.mode_set(mode="EDIT")
-    if '17' in obj.name:
-        debugpy.breakpoint()
-        raise KeyboardInterrupt()
     bpy.ops.mesh.bevel(affect='EDGES',offset=0.1875 * SCALE)
     bpy.ops.mesh.select_mode(type='EDGE')
     bpy.ops.mesh.select_all(action='DESELECT')
     bpy.ops.object.mode_set(mode="OBJECT")
+    # if '17' in obj.name:
+    #     debugpy.breakpoint()
+    #     raise KeyboardInterrupt()
 
 def polarity_changes():
     """ ** probably not needed **
