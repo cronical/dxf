@@ -17,8 +17,7 @@
         {
           "localRoot": "${workspaceFolder}",
           "remoteRoot": "${workspaceFolder}"
-        }
-
+        },
       ]
     },
 
