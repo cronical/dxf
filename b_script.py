@@ -3,6 +3,7 @@ Run inside of Blender
 
 """
 from itertools import compress
+import logging
 import os
 from math import dist
 import bpy
@@ -13,6 +14,9 @@ from mathutils.geometry import intersect_line_line
 import numpy as np
 
 
+logger = logging.getLogger(__name__)
+logger.info("--------------- Start of xtrackcad import -------------------")
+logger.setLevel(logging.INFO)
 bl_info = {
     "name": "XTrackCad to 3D",
     "author": "George Dobbs",
@@ -40,56 +44,62 @@ def vertex_coordinates(vert:bpy.types.MeshVertex,matrix_world:Matrix)->tuple:
 
 def get_z(vert:bpy.types.MeshVertex,elevations:np.array,matrix_world:Matrix)->float:
     """Given a vertex, vert
-    the end_point array 
+    the end_point array - passed as a numpy array
     the matrix world from the object holding the vertex:
-    Check blender vertex against imported data to locate z value
+    Check vertex against imported data to locate z value (within a tolerance)
     Return the xy,z value if found, otherwise None
+    The xy value is from the vertex (not the elevation file)
     """
-    coords = vertex_coordinates(vert,matrix_world)
+    coords = vertex_coordinates(vert,matrix_world).xy
 
-    # trying default tolerage of 1e-8
-    sel=np.isclose(elevations[:,0],coords[0])
-    sel=sel & np.isclose(elevations[:,1],coords[1])
-    match sum(sel):
-        case 0:
-            return None
-        case 1: 
-            z=compress(elevations[:,2],sel).__next__()
-            xy=compress(elevations[:,0:2],sel).__next__()
-            return xy,z
-        case _:
-            raise ValueError(f"{coords} found on more than 1 line in end points matrix")
+    # matching tolerance to that used to merge near vertices.
+    tolm=.003 # meters
+    tol= tolm / SCALE
+    vectors=[Vector(elevations[i,:]).xy for i in range(len(elevations))]
+    distance=[dist(v,coords) for v in vectors]
+    sel=[d<tol for d in distance]
+    if sum(sel)==0:
+        return None
+    # if more than one take the one closest
+    d=list(compress(distance,sel))
+    ixs=list(compress(range(len(sel)),sel))
+    ix=ixs[d.index(min(d))]
+    z=elevations[ix,2]
+    return coords,z
+
 
 def separate_sections(obj,vertex_sets):
     """Create a new mesh from the items in each vertex_set based on the coordinates.
     Use the coordinates since the index will likely change based on this activity.
     The new mesh will have the same name as the obj but with a suffix .001 etc attached.
-    Return dict with new mesh name as key and the coordinates as the values"""
+    Return list of the new mesh names"""
     bpy.ops.object.mode_set(mode='OBJECT')
     known_meshes=set([o.name for o in bpy.context.scene.objects if o.type=='MESH'])
-    new_map={} 
+    new_meshes=[]
     for vx,vertex_set in enumerate(vertex_sets): # vx for debugging
         vertex_cos=[v[1] for v in vertex_set]
         all_cos=[v.co / SCALE for v in obj.data.vertices]
-        print (f"    {obj.name} has {len(obj.data.edges)} edges")
+        logger.info (f"    {obj.name} has {len(obj.data.edges)} edges")
         for ex,edge in enumerate(obj.data.edges): # ex for debugging
             cos=[all_cos[v] for v in edge.vertices]
 
             if nearly_in(cos[0],vertex_cos) or nearly_in(cos[1],vertex_cos):
                 edge.select = True
-                #print(f"      {cos} selected")
+                #log.debug(f"      {cos} selected")
             else:
                 edge.select = False
-                #print(f"      {cos} rejected")
-        bpy.ops.object.mode_set(mode='EDIT')
+                #log.debug(f"      {cos} rejected")
+        bpy.ops.object.mode_set(mode='EDIT') # separate only available in edit mode
         bpy.ops.mesh.separate() 
+        bpy.ops.object.mode_set(mode='OBJECT')
         new_mesh_set=set([o.name for o in bpy.context.scene.objects if o.type=='MESH'])
         new_mesh_name=list(new_mesh_set-known_meshes)[0]
         known_meshes=new_mesh_set
-        print (f"    -- selected vertices moved to {new_mesh_name}")
-        new_map[new_mesh_name]=vertex_cos
-        bpy.ops.object.mode_set(mode='OBJECT')
-    return new_map
+        logger.info (f"    -- selected vertices moved to {new_mesh_name}")
+        new_meshes.append(new_mesh_name)
+    return new_meshes
+    
+
 
 def xy_to_complex(items):
     """Take the x,y values from items and return np array of complex numbers
@@ -107,32 +117,33 @@ def nearly_in(coord:Vector,search_in):
     sel=np.isclose(all_coords,c,atol=0.01)
     return any(sel)
 
-def panels_up(obj,height):
-    """Extrude all edges to height along z dimension"""
-    bpy.ops.object.mode_set(mode='OBJECT') 
-    scaled_height=height * SCALE # got to be a better way to scale
-    for edge in obj.data.edges:
-        edge.select = True
-    bpy.ops.object.mode_set(mode='EDIT')
-    bpy.ops.mesh.extrude_edges_move(TRANSFORM_OT_translate={"value":(0,0,scaled_height)}) 
-    bpy.ops.mesh.select_all(action='DESELECT')
-    bpy.ops.object.mode_set(mode='OBJECT')
 
 def panel_info(obj):
-    """get normals, base vertices from all faces, which have been raised. Assumes these are the only faces
-    returns normals, coordinates (length n x 2)
+    """ Returns coordinates of base (z=0) vertices from the end faces. 
+    One for each end of the mesh (eg 3 for switches)
+    Assumes the "raised panels" are the only faces in the obj.
     """
-    normals=[]
     coordinates=[]
     bm = bmesh.new()
     bm.from_mesh(obj.data)
+    bm.verts.ensure_lookup_table()
     bm.faces.ensure_lookup_table()
+    verts={} # key is index, value is count of faces
     for face in bm.faces:
         for v in face.verts:
             if v.co.z==0:
-                coordinates.append(v.co / SCALE)
-        normals.append(face.normal / SCALE)
-    return normals,coordinates
+                if v.index in verts:
+                    verts[v.index]+=1
+                else:
+                    verts[v.index]=1
+    for k,v in verts.items():
+        if v==1: # keep only the ones that are used by 1 face
+            vert=bm.verts[k]
+            coordinates.append(vert.co / SCALE)
+    logger.debug("end points?")
+    for co in coordinates:
+        logger.debug(co)
+    return coordinates
 
 def merge_sections(sections):       
     """ Merge sections which contain close points
@@ -214,10 +225,10 @@ def cluster_vertices(obj):
                 break
         if section_assigned is False:
             sections.append(set(vertex_info))
-
-    sections=merge_sections(sections)    
+    # debugpy.breakpoint()
+    clusters=merge_sections(sections)    
     pass    
-    return sections
+    return clusters
 
 def heights_for_obj(obj:bpy.types.Object,elevations:np.array)->dict:
     """Get the defined heights for an object
@@ -226,6 +237,8 @@ def heights_for_obj(obj:bpy.types.Object,elevations:np.array)->dict:
     mesh=obj.data
     found={}
     for vert in mesh.vertices:
+        if obj.name=="XTRKCAD3_curve_.003":
+            debugpy.breakpoint()
         xyz=get_z(vert,elevations=elevations,matrix_world=obj.matrix_world)
         if xyz is None:
             continue
@@ -243,14 +256,14 @@ def convert_to_meshes():
             bpy.context.view_layer.objects.active = obj # apparently needs to be active and selected
             obj.select_set(True)
             bpy.ops.object.convert(target='MESH')
-            print (f"{obj.name} converted to mesh")
+            logger.info (f"{obj.name} converted to mesh")
 
 def read_track_coordinates(filepath):
     """read the xyz coordinates of the track end points
     assume its has a header row  and the rest is x,y,z data
     """
     elevations=np.loadtxt(filepath,delimiter=',',dtype=float,skiprows=1)
-    print (f"Read data for {len(elevations)} end points")
+    logger.info (f"Read data for {len(elevations)} end points")
     return elevations
 
 def new_blender_file():
@@ -304,9 +317,20 @@ def extrude_to_height(obj:bpy.types.Object,heights:dict,layer:str):
     cnt=len(hv)
     rqd={"level":1,"inclined":2}[layer]
     if rqd!=cnt:
-        raise ValueError(f"{layer} object {obj.name} does not have exactly {rqd} height(s): {heights.values()}")
+        logger.error(f"ERROR: {layer} object {obj.name} does not have exactly {rqd} height(s): {heights.values()}")
+        logger.error(f"Cannot raise panels for {obj.name}")
+        return
     height=max(heights.values())
-    panels_up(obj,height)
+    #panels_up(obj,height)
+    """Extrude all edges to height along z dimension"""
+    bpy.ops.object.mode_set(mode='OBJECT') 
+    scaled_height=height * SCALE # got to be a better way to scale
+    for edge in obj.data.edges:
+        edge.select = True
+    bpy.ops.object.mode_set(mode='EDIT')
+    bpy.ops.mesh.extrude_edges_move(TRANSFORM_OT_translate={"value":(0,0,scaled_height)}) 
+    bpy.ops.mesh.select_all(action='DESELECT')
+    bpy.ops.object.mode_set(mode='OBJECT')    
 
 def show_face(face,indent=None):
     """Show vertices for purpose of debugging. 
@@ -318,7 +342,7 @@ def show_face(face,indent=None):
             inches=tuple(v.co / SCALE)
             inches=tuple((round(a,6) for a in inches))
             points+=[format(f"{inches}")]
-        print(msg+', '.join(points))
+        logger.debug(msg+', '.join(points))
 
 def show_edge(edge,indent=None):
     """Show vertices for purpose of debugging. 
@@ -330,11 +354,11 @@ def show_edge(edge,indent=None):
             inches=tuple(v.co / SCALE)
             inches=tuple((round(a,6) for a in inches))
             points+=[format(f"{inches}")]
-        print(msg+', '.join(points))
+        logger.debug(msg+', '.join(points))
 
 def is_face_on_top(face):
     """Return true if all vertices on a face are non zero
-    all non-zero means its a face on top. If indent is provided debug message printed
+    all non-zero means its a face on top. 
     """
     nz=0
     for v in face.verts:
@@ -350,25 +374,26 @@ def is_edge_on_top(edge):
         nz+=int(v.co.z>0)
     return nz==len(edge.verts)
 
-def bevel(obj,center_normals:np.array,center_xy_coords:np.array):
+def bevel(obj,center_xy_coords:np.array):
     """ Bevel the top outside edges.
     """
     bpy.ops.object.select_all(action='DESELECT')
     obj.select_set(True)
     tol=.001
     bm = bmesh.new()
-    bm.from_mesh(obj.data)
+    me=obj.data
+    bm.from_mesh(me)
     bm.edges.ensure_lookup_table()
     bm.verts.ensure_lookup_table()
-    print(f"Finding edges to bevel for {obj.name}")
-    print(f"  There are are {len(bm.edges)} edges")
+    logger.info(f"Finding edges to bevel for {obj.name}")
+    logger.info(f"  There are are {len(bm.edges)} edges")
     edges_to_select=set()
     v2e_map={} # key index of vertex, values is list of up to 3 edge indices
     for edge in bm.edges:
         if is_edge_on_top(edge):
-            print ("    Top edge found:")
+            logger.debug ("    Top edge found:")
             show_edge(edge,indent=4)
-            print (f"      Edge: {edge.index}")
+            logger.debug (f"      Edge: {edge.index}")
             # eliminate crossing edges
             top_cos=[]
             for v in edge.verts:
@@ -383,11 +408,13 @@ def bevel(obj,center_normals:np.array,center_xy_coords:np.array):
                 pole_top =Vector((pole_bot.x,pole_bot.y,height))
                 intersect=intersect_line_line(top_cos[0],top_cos[1],pole_bot,pole_top)
                 if intersect is None:# should never be colinear and thus never None
-                    debugpy.breakpoint()
-                    pass
+                    logger.error("Intersect method produced a None")
+                    logger.error(f"Pole: {pole_bot,pole_top}")
+                    logger.error(f"Top: {top_cos}")
+                    continue
                 d=dist(intersect[0],intersect[1])
                 if d<tol: 
-                    print(f"        Edge {edge.index} crossses center")
+                    logger.debug(f"        Edge {edge.index} crossses center")
                     cross_center=True
                     break
                 else:
@@ -400,11 +427,16 @@ def bevel(obj,center_normals:np.array,center_xy_coords:np.array):
                     v2e_map[vert.index].append(edge.index)
                 else:
                     v2e_map[vert.index]=[edge.index]
-            print ("         Edge tentatively selected")
+            logger.debug ("         Edge tentatively selected")
 
     # remove the crossing edges using dot product
     # this gets the ones created by the bezier curves
     ignore_vix=[]
+    log_level=logging.INFO
+    if obj.name=='XTRKCAD17_curve_.001':
+        log_level=logging.DEBUG
+    logger.setLevel(log_level)
+    logger.info(f"log level is {logger.level}")
     for vix,edges in v2e_map.items():
         if vix in ignore_vix: # way to ignore other side of deleted edges
             continue
@@ -412,35 +444,35 @@ def bevel(obj,center_normals:np.array,center_xy_coords:np.array):
             continue
         shared_co=(bm.verts[vix].co /SCALE).freeze()
         vectors=[]
-        print("Edges")
+        logger.debug("Edges")
         for ix in edges: # convert the edges to vectors
             edge=bm.edges[ix]
             # remove the common point all are direction from (0,0,0)
             both_cos=[(v.co / SCALE).freeze() for v in edge.verts]            
-            print(f"{ix}: {both_cos}")
+            logger.debug(f"{ix}: {both_cos}")
             other_co=list(set(both_cos)-{shared_co})[0] # the coordinates of the non-common point
             length=dist(shared_co,other_co) # used to scale to get unit vectors
             vector=other_co-shared_co # center at (0,0,0)
             vector=vector /length # unit vector needed so dot product works right            
             vectors.append(vector)
-        print("Vectors")
+        logger.debug("Vectors")
         for v in vectors:
-            print(v)
+            logger.debug(v)
         pairs=(0,1),(0,2),(1,2) # the three possible pairings
         dp=[]
         for pair in pairs:
             dp.append(vectors[pair[0]] @ vectors[pair[1]]) # @ is python for dot product 
-        print ("Dot products by pair")
+        logger.debug ("Dot products by pair")
 
         # make a histogram to count the times each edge is a near perpendicular
         # the one with 2 will be the crossing edge
         hist={0:0,1:0,2:0}
         for pr,d in zip(pairs,dp):
-            print (pr,d)
-            if abs(d)<.02: # tolerance determined empirically.  Saw one just over .01
+            logger.debug (f"{pr},{d}")
+            if abs(d)<.14: # tolerance determined empirically. 
                 for edge_set_ix in pr:
                     hist[edge_set_ix]+=1
-        print(hist)
+        logger.debug(hist)
         for edge_set_ix,cnt in hist.items():
             if cnt==2:
                 to_remove_ix=edges[edge_set_ix]
@@ -449,27 +481,34 @@ def bevel(obj,center_normals:np.array,center_xy_coords:np.array):
                 edge=bm.edges[to_remove_ix]
                 for v in edge.verts: # might as well remove both sides
                     ignore_vix.append(v.index)
-                print(f"Edge set item {edge_set_ix} with index {to_remove_ix} removed.")
+                logger.debug(f"Edge set item {edge_set_ix} with index {to_remove_ix} removed.")
 
+    to_bevel=[bm.edges[ix]for ix in edges_to_select]
+    bmesh.ops.bevel(bm, geom=to_bevel,offset=0.1875 * SCALE,affect='EDGES')
+    bm.to_mesh(me)
+    me.update()
+    bm.clear()
 
-    bpy.ops.object.mode_set(mode="EDIT")
-    bpy.ops.mesh.select_mode(type='FACE')
-    bpy.ops.mesh.select_all(action='DESELECT')
-    bpy.ops.object.mode_set(mode="OBJECT") # in object mode, selection takes right away
-    n=0
-    for edge in obj.data.edges:
-        if edge.index in edges_to_select:
-            edge.select=True
-            n+=1
-    print(f"       {n} edges selected")
-    bpy.ops.object.mode_set(mode="EDIT")
-    bpy.ops.mesh.bevel(affect='EDGES',offset=0.1875 * SCALE)
-    bpy.ops.mesh.select_mode(type='EDGE')
-    bpy.ops.mesh.select_all(action='DESELECT')
-    bpy.ops.object.mode_set(mode="OBJECT")
-    # if '17' in obj.name:
-    #     debugpy.breakpoint()
-    #     raise KeyboardInterrupt()
+    bm.free()
+
+    # bpy.ops.object.mode_set(mode="EDIT")
+    # bpy.ops.mesh.select_mode(type='FACE')
+    # bpy.ops.mesh.select_all(action='DESELECT')
+    # bpy.ops.object.mode_set(mode="OBJECT") # in object mode, selection takes right away
+    # n=0
+    # for edge in obj.data.edges:
+    #     if edge.index in edges_to_select:
+    #         edge.select=True
+    #         n+=1
+    #     else:
+    #         edge.select=False
+    # logger.info(f"       {n} edges selected")
+    # bpy.ops.object.mode_set(mode="EDIT")
+    # bpy.ops.mesh.bevel(affect='EDGES',offset=0.1875 * SCALE)
+    # bpy.ops.mesh.select_mode(type='EDGE')
+    # bpy.ops.mesh.select_all(action='DESELECT')
+    # bpy.ops.object.mode_set(mode="OBJECT")
+
 
 def polarity_changes():
     """ ** probably not needed **
@@ -552,16 +591,17 @@ def create_bezier(control_points: list):
 def solidify_roadbed():
     """Solidfy the roadbed sections.  Expect panels are up. Returns list of roadbed names"""
     bed_sections=[]
-    print ("Roadbed sections will be: ")    
+    logger.info ("Roadbed sections will be: ")    
     for obj in bpy.data.objects:
         if obj.name.startswith("XTRKCAD"):
             bed_sections.append(obj.name)
-            print (f"{obj.name}")            
+            logger.info (f"{obj.name}")            
             obj.select_set(True)
-            print(f"Solidifying: {obj.name}")   
+            logger.info(f"Solidifying: {obj.name}")   
             bpy.context.view_layer.objects.active = obj
             bpy.ops.object.modifier_add(type='SOLIDIFY')
             bpy.context.object.modifiers["Solidify"].solidify_mode="NON_MANIFOLD" # i.e. complex
+            bpy.context.object.modifiers["Solidify"].nonmanifold_thickness_mode="FIXED"
             bpy.context.object.modifiers["Solidify"].thickness = .9375* SCALE
             bpy.context.object.modifiers["Solidify"].offset = 0
             bpy.ops.object.modifier_apply(modifier="Solidify")
@@ -571,27 +611,60 @@ def solidify_trimmers():
     roadbed along a grade. Returns list of trimmer names.
     """
     trimmers=[]
-    print ("Trimmers will be: ")    
+    logger.info ("Trimmers will be: ")    
     for obj in bpy.data.objects:
         if obj.name.startswith("Bézier"):
             trimmers.append(obj.name)
-            print (f"{obj.name}")            
+            logger.info (f"{obj.name}")            
             bpy.ops.object.select_all(action='DESELECT')
             obj.select_set(True)
             bpy.context.view_layer.objects.active = obj
-            print(f"Selected and active: {obj.name}")   
+            logger.info(f"Selected and active: {obj.name}")   
             bpy.ops.object.mode_set(mode='EDIT')
             bpy.ops.mesh.select_all(action='SELECT')
             bpy.ops.mesh.extrude_edges_move(TRANSFORM_OT_translate={"value":(0,0,.0254)}) # assume 1" is enough
             bpy.ops.object.mode_set(mode='OBJECT')
             bpy.ops.object.modifier_add(type='SOLIDIFY')
             bpy.context.object.modifiers["Solidify"].solidify_mode="NON_MANIFOLD" # i.e. complex
-            bpy.context.object.modifiers["Solidify"].thickness = 2*.0254
+            bpy.context.object.modifiers["Solidify"].thickness = 3.5*.0254 # estimate wide enough to handle big curve
             bpy.context.object.modifiers["Solidify"].offset = 0
             bpy.ops.object.modifier_apply(modifier="Solidify")
     return trimmers
 
+def merge_near_vertices():
+    """ Merge vertices in the object when they are close
+    The dxf import leaves gaps in some cases.  
+    This should eliminate the gaps by merging near points
+    https://blender.stackexchange.com/questions/68093/remove-doubles-on-multiple-objects
+    """
+    threshold=0.003# in meters (about 1/8 inch)
+    
+    objs = set(o for o in bpy.context.scene.objects if o.type == 'MESH')
+    bm = bmesh.new()
 
+    for obj in objs:
+        logger.info (f"  Merging near vertices for {obj.name}")
+        m=obj.data
+        bm.from_mesh(m)
+        bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=threshold)
+        bm.to_mesh(m)
+        m.update()
+        bm.clear()
+
+    bm.free()
+
+
+
+
+            # obj=bpy.data.objects[mesh_name]
+            # bpy.ops.object.mode_set(mode='OBJECT')
+            # bpy.ops.object.select_all(action='DESELECT')
+            # obj.select_set(True)
+            # bpy.ops.object.mode_set(mode='EDIT')
+            # bpy.ops.mesh.select_mode(type='VERT')
+            # bpy.ops.mesh.select_all(action='SELECT')
+            # bpy.ops.mesh.remove_doubles(threshold= threshold)
+            # bpy.ops.object.mode_set(mode='OBJECT')
 
 def meshes_of_type(mesh_type):
     """Given a type of level or inclined, return list of mesh names"""
@@ -605,6 +678,86 @@ def delete_objects_by_name(object_names):
         if obj.name in object_names:
             obj.select_set(True)
     bpy.ops.object.delete(use_global=True)              
+        
+def split_xtc_layers():
+    """Split the xtc provided layers into mesh objects
+    return dict of layer names : [object names]
+    """
+    layer_obj_map={}
+    original_objects=list(bpy.context.scene.objects)
+    for obj in original_objects:
+        if obj.type == 'MESH':
+            logger.info(f"Splitting layer: {obj.name}")
+            layer=XTC_LAYER_TYPES[obj.name]
+            clusters=cluster_vertices(obj)
+            layer_obj_map[layer] = separate_sections(obj,clusters)
+    return layer_obj_map
+
+def panels_up_for_layer(layer,layer_mesh_map,elevations):  
+    """Raise the panels for all meshes associated with a layer
+    returns a dict of object names: panel info
+    """
+    bevel_info={} 
+    for mesh_name in layer_mesh_map[layer]:
+        logger.info (f"  Putting up panels for {mesh_name}")
+        obj=bpy.data.objects[mesh_name]
+        heights=height_for_vertex_set(obj.data.vertices,elevations,obj.matrix_world)
+        extrude_to_height(obj,heights,layer)
+        info=panel_info(obj)
+        bevel_info[obj.name]=info # do bevels after all sections are up, solid & trimmed
+    return bevel_info
+
+def create_bezier_controls(layer_mesh_map,elevations):
+    """For the inclined layer create a bezier curve.  
+    For that we need heights from the adjoining level sections.
+    there should a point at the same x,y in one of the level sections
+    """
+    bezier_controls=[] # to determine the bezier points. each value is an ordered list of points
+    tol=.001
+    for mesh_name in layer_mesh_map["inclined"]:
+        logger.info (f"Creating bezier control points for {mesh_name}")
+        obj=bpy.data.objects[mesh_name]
+        heights=height_for_vertex_set(obj.data.vertices,elevations,obj.matrix_world)
+        bz_points=[]
+        candidates=[] # for error reporting only
+        for xy,height in heights.items():
+            xyz=(xy[0],xy[1],height)
+            logger.debug(f"    looking for {xyz} in level meshes")
+            for mesh_name in meshes_of_type("level"):
+                mesh=bpy.data.objects[mesh_name]
+                logger.debug(f"      {len(mesh.data.edges)} edges in {mesh_name}")
+                bz=[]
+                for edge in mesh.data.edges:
+                    vcs=[]
+                    near=[]
+                    for ev in edge.vertices:
+                        vc=tuple(vertex_coordinates(mesh.data.vertices[ev],mesh.matrix_world ))
+                        vcs.append(vc)
+                        near.append(dist(xyz,vc)<tol)
+                    if vcs[0][2]!=vcs[1][2]: # not on same level
+                        continue
+                    if vcs[0][2]==0: # only consider the ones at non zero height
+                        continue
+                    candidates+=vcs
+                    if any(near): # if either edge vertex is near enough then both are part of bezier 
+                        # the following puts the incline layer points in the center
+                        # and the level points on the outside
+                        bz=sorted(vcs,key=lambda v:dist(v,xyz)<tol,reverse=bool(len(bz_points)))
+                        bz_points+=bz
+                        for bp in bz:
+                            logger.debug (f"        {bp}")
+                        break # done, no more edges needed for this side of the bezier curve
+                logger.debug(f"      {len(bz_points)} Bezier points")
+                if len(bz)==2: # this side of the curve is satisfied by the most recent mesh
+                    break
+        if len(bz_points)!=4: # all meshes used up and we still don't have a match
+            logger.error(f"Could not create bezier control.  Need 4 points but have {len(bz_points)}")
+            logger.error("The candidates can be seen by uncommenting the next lines: ")
+            # for candidate in candidates:
+            #     log.error(f"  {candidate}")
+        else:
+            bezier_controls.append(bz_points)
+    return bezier_controls
 
 class IMPORT_xtc(bpy.types.Operator):
     """Xtrackcad to 3D (.dxf, .csv)"""
@@ -634,91 +787,25 @@ class IMPORT_xtc(bpy.types.Operator):
         import_dxf_file(DATA_FOLDER+"revised.dxf")
 
         convert_to_meshes()
+        merge_near_vertices()
 
-        # to determine the bezier points
-        bezier_controls=[] # each values= is an ordered list of points
-        
+        layer_mesh_map=split_xtc_layers()
 
-        # set up to do level layer before inclined to help get bezier points
-        names=[obj.name for obj in bpy.data.objects] 
-        layers=[XTC_LAYER_TYPES[name] for name in names] 
-        nl=list(zip(names,layers))
-        nl=sorted(nl,key=lambda x: x[1],reverse=True)
-        names=[x[0]for x in nl]
-        
-        bevel_info={} # incline is beveled after trim
         debugpy.breakpoint()
         pass # set other breakpoints, then continue
 
-        for name in names: #level then inclined
-            layer=XTC_LAYER_TYPES[name]
-            print(f"Starting layer: {layer}")
-            obj = bpy.data.objects[name]
-            clusters=cluster_vertices(obj)
-            sections=separate_sections(obj,clusters)
-            
-            for mesh_name,section in sections.items():
-                # section is mesh_name,(x,y,z) of all points on z=0 plane for this section
-                obj=bpy.data.objects[mesh_name]
-                all_cos=[v.co / .0254 for v in obj.data.vertices]
-                if len(all_cos)==0: # the original mesh now has 0 elements.
-                    continue
-                print (f"  Starting section {mesh_name}")
-                section_verts=[obj.data.vertices[all_cos.index(co) ]for co in section] 
-                heights=height_for_vertex_set(section_verts,elevations,obj.matrix_world)
-                extrude_to_height(obj,heights,layer)
-                cn,cnx=panel_info(obj)
-                bevel_info[obj.name]=(cn,cnx) # do bevels after all sections are up, solid & trimmed
-                # for inclined layer create a bezier curve.  For that we need heights from the 
-                # adjoining level sections.
-                if layer =='inclined':
-                    # there should a point at the same x,y in one of the level sections
-                    bz_points=[]
-                    tol=.001
-                    for xy,height in heights.items():
-                        xyz=(xy[0],xy[1],height)
-                        print(f"    looking for {xyz} in level meshes")
-                        candidates=[] # for error reporting only
-                        for mesh_name in meshes_of_type("level"):
-                            mesh=bpy.data.objects[mesh_name]
-                            print(f"      {len(mesh.data.edges)} edges in {mesh_name}")
-                            bz=[]
-                            for edge in mesh.data.edges:
-                                vcs=[]
-                                near=[]
-                                for ev in edge.vertices:
-                                    vc=tuple(vertex_coordinates(mesh.data.vertices[ev],mesh.matrix_world ))
-                                    vcs.append(vc)
-                                    near.append(dist(xyz,vc)<tol)
-                                if vcs[0][2]!=vcs[1][2]: # not on same level
-                                    continue
-                                if vcs[0][2]==0: # only consider the ones at non zero height
-                                    continue
-                                candidates+=vcs
-                                if any(near): # if either edge vertex is near enough then both are part of bezier 
-                                    # the following puts the incline layer points in the center
-                                    # and the level points on the outside
-                                    bz=sorted(vcs,key=lambda v:dist(v,xyz)<tol,reverse=bool(len(bz_points)))
-                                    bz_points+=bz
-                                    for bp in bz:
-                                        print (f"        {bp}")
-                                    break # done, no more edges needed for this side of the bezier curve
-                            print(f"      {len(bz_points)} Bezier points")
-                            if len(bz)==2: # this side of the curve is satisfied by the most recent mesh
-                                break
-                    if len(bz_points)!=4: # all meshes used up and we still don't have a match
-                        print(f"Could not create bezier control.  Need 4 points but have {len(bz_points)}")
-                        print("For the the ones that we considered uncomment display of candidates")
-                        # for candidate in candidates:
-                        #     print(f"  {candidate}")
-                    else:
-                        bezier_controls.append(bz_points)
-        
+        bevel_info=panels_up_for_layer("level",layer_mesh_map,elevations)
+        bi=panels_up_for_layer("inclined",layer_mesh_map,elevations)
+        bevel_info.update(bi)
+
+        bezier_controls=create_bezier_controls(layer_mesh_map,elevations)
+        debugpy.breakpoint()
         for bz_points in bezier_controls:
             create_bezier(bz_points)
         convert_to_meshes() # the beziers this time
 
         _=solidify_roadbed()
+       
         trimmers=solidify_trimmers()
 
         # do the trim and discard the trim tools
@@ -736,15 +823,16 @@ class IMPORT_xtc(bpy.types.Operator):
                 bpy.context.object.modifiers[mname].use_self=True
                 bpy.ops.object.modifier_apply(modifier=mname)
         delete_objects_by_name(trimmers)             
-        
+
+        # debugpy.breakpoint()
+        # raise KeyboardInterrupt()          
+
         # do the bevels
         for name,info in bevel_info.items():
-            debugpy.breakpoint()
+            logger.info(f"Beveling {name}")
             obj=bpy.data.objects[name]
-            cn,cnx=info
-            bevel(obj,cn,cnx)
-            # debugpy.breakpoint()
-            # raise KeyboardInterrupt()                
+            bevel(obj,info)
+              
 
         pass
 
