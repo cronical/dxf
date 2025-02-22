@@ -1,0 +1,11 @@
+#!/bin/zsh
+# deploy and either run the add on or initiate debugger
+# default is to run but -d will initialize the debugger
+script="./start_run.py"
+if [[ $1 = "-d" ]] ; then
+script="./start_dbg.py" ;
+fi
+cp ./b_script.py /Users/george/Library/Application\ Support/Blender/4.3/scripts/addons/b_script.py
+
+/Applications/Blender.app/Contents/MacOS/Blender --python $script
+

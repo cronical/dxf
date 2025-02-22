@@ -1,3 +1,0 @@
-#!/bin/zsh
-cp ./b_script.py /Users/george/Library/Application\ Support/Blender/4.3/scripts/addons/b_script.py
-/Applications/Blender.app/Contents/MacOS/Blender --python ./start_dbg.py
