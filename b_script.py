@@ -10,7 +10,7 @@ import bpy
 import bmesh
 import debugpy
 from mathutils import Matrix, Vector
-from mathutils.geometry import intersect_line_line
+from mathutils import geometry 
 import numpy as np
 
 
@@ -374,8 +374,36 @@ def is_edge_on_top(edge):
         nz+=int(v.co.z>0)
     return nz==len(edge.verts)
 
+def disolve_over_used_verts(bm):
+    """Disolve from bmesh bm any a vertex with more than three edges non zero z-dimension
+    (not currently in use... on straight switches these points are needed as part of the lines
+    that create the frog.  Possibly could split the lines at the frog.)
+    This is to remove anomolies caused by switches.
+    """
+    debugpy.breakpoint()
+    verts=list(bm.verts) # make a copy since we will be removing some
+    for vert in verts:
+        le=set(vert.link_edges)
+        not_top=set()
+        for e in le:
+            zs=[v.co.z for v in e.verts]
+            if 0 in zs:
+                not_top.add(e)
+        le=le - not_top                
+        if len(le)>3:
+            logger.info("edges attached to disolve point")
+            for e in le:
+                cos=[v.co / SCALE for v in e.verts]
+                logger.info(cos)
+            co=vert.co / SCALE
+            logger.info(f"Will disolve vertex at {co} ")
+            success=bmesh.utils.vert_dissolve(vert)
+            logger.info(f"disolve returned {success}")
+    
+
 def bevel(obj,center_xy_coords:np.array):
     """ Bevel the top outside edges.
+    Locating these edges is the hard part.
     """
     bpy.ops.object.select_all(action='DESELECT')
     obj.select_set(True)
@@ -383,51 +411,73 @@ def bevel(obj,center_xy_coords:np.array):
     bm = bmesh.new()
     me=obj.data
     bm.from_mesh(me)
-    bm.edges.ensure_lookup_table()
+    bm.verts.ensure_lookup_table()
     bm.verts.ensure_lookup_table()
     logger.info(f"Finding edges to bevel for {obj.name}")
     logger.info(f"  There are are {len(bm.edges)} edges")
     edges_to_select=set()
     v2e_map={} # key index of vertex, values is list of up to 3 edge indices
-    for edge in bm.edges:
-        if is_edge_on_top(edge):
-            logger.debug ("    Top edge found:")
-            show_edge(edge,indent=4)
-            logger.debug (f"      Edge: {edge.index}")
-            # eliminate crossing edges
-            top_cos=[]
-            for v in edge.verts:
-                top_cos.append(v.co / SCALE)
-            if dist(top_cos[0],top_cos[1])<tol: # bizzarely close edges seen which caused intersect None
-                continue # just ignore
+    # disolve_over_used_verts(bm)
+    # bm.to_mesh(me)
+    # me.update()
+    # bm.verts.ensure_lookup_table()
+    # bm.edges.ensure_lookup_table()
 
-            # intercept method - works for level areas and the ends of the inclined ares
-            cross_center=False
-            for pole_bot in center_xy_coords:
-                height=1+max([co.z for co in top_cos])
-                pole_top =Vector((pole_bot.x,pole_bot.y,height))
-                intersect=intersect_line_line(top_cos[0],top_cos[1],pole_bot,pole_top)
-                if intersect is None:# should never be colinear and thus never None
-                    logger.error("Intersect method produced a None")
-                    logger.error(f"Pole: {pole_bot,pole_top}")
-                    logger.error(f"Top: {top_cos}")
-                    continue
-                d=dist(intersect[0],intersect[1])
-                if d<tol: 
-                    logger.debug(f"        Edge {edge.index} crossses center")
-                    cross_center=True
-                    break
-                else:
-                    continue
-            if cross_center:
-                continue # go on to next edge
-            edges_to_select.add(edge.index)
-            for vert in edge.verts:
-                if vert.index in v2e_map:
-                    v2e_map[vert.index].append(edge.index)
-                else:
-                    v2e_map[vert.index]=[edge.index]
-            logger.debug ("         Edge tentatively selected")
+    top_edges=[e for e in bm.edges if is_edge_on_top(e)]
+    bm.verts.ensure_lookup_table()
+    bm.edges.ensure_lookup_table()
+    
+    # if '.002' in obj.name:
+    #     for e in bm.edges:
+    #         if e in top_edges:
+    #             e.select=True
+    #         else:
+    #             e.select=False
+        
+    #     bm.to_mesh(me)
+    #     me.update()
+    #     bm.clear()
+
+    #     bm.free()
+    #     raise KeyboardInterrupt()
+
+
+    for edge in top_edges:
+
+        # eliminate crossing edges
+        top_cos=[]
+        for v in edge.verts:
+            top_cos.append(v.co / SCALE)
+        if dist(top_cos[0],top_cos[1])<tol: # bizzarely close edges seen which caused intersect None
+            continue # just ignore
+
+        # intercept method - works for level areas and the ends of the inclined ares
+        cross_center=False
+        for pole_bot in center_xy_coords:
+            height=1+max([co.z for co in top_cos])
+            pole_top =Vector((pole_bot.x,pole_bot.y,height))
+            intersect=geometry.intersect_line_line(top_cos[0],top_cos[1],pole_bot,pole_top)
+            if intersect is None:# should never be colinear and thus never None
+                logger.error("Intersect method produced a None")
+                logger.error(f"Pole: {pole_bot,pole_top}")
+                logger.error(f"Top: {top_cos}")
+                continue
+            d=dist(intersect[0],intersect[1])
+            if d<tol: 
+                logger.debug(f"        Edge {edge.index} crossses center")
+                cross_center=True
+                break
+            else:
+                continue
+        if cross_center:
+            continue # go on to next edge
+        edges_to_select.add(edge.index)
+        for vert in edge.verts:
+            if vert.index in v2e_map:
+                v2e_map[vert.index].append(edge.index)
+            else:
+                v2e_map[vert.index]=[edge.index]
+        logger.debug ("         Edge tentatively selected")
 
     # remove the crossing edges using dot product
     # this gets the ones created by the bezier curves
@@ -436,7 +486,7 @@ def bevel(obj,center_xy_coords:np.array):
     if obj.name=='XTRKCAD17_curve_.001':
         log_level=logging.DEBUG
     logger.setLevel(log_level)
-    logger.info(f"log level is {logger.level}")
+
     for vix,edges in v2e_map.items():
         if vix in ignore_vix: # way to ignore other side of deleted edges
             continue
@@ -479,7 +529,7 @@ def bevel(obj,center_xy_coords:np.array):
                 edges_to_select.remove(to_remove_ix)
                 # other side of crossing can be removed to prevent doing it again on the other side
                 edge=bm.edges[to_remove_ix]
-                for v in edge.verts: # might as well remove both sides
+                for v in edge.verts: # might as well add both sides to the ignore list
                     ignore_vix.append(v.index)
                 logger.debug(f"Edge set item {edge_set_ix} with index {to_remove_ix} removed.")
 
@@ -644,11 +694,11 @@ def merge_near_vertices():
 
     for obj in objs:
         logger.info (f"  Merging near vertices for {obj.name}")
-        m=obj.data
-        bm.from_mesh(m)
+        me=obj.data
+        bm.from_mesh(me)
         bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=threshold)
-        bm.to_mesh(m)
-        m.update()
+        bm.to_mesh(me)
+        me.update()
         bm.clear()
 
     bm.free()
@@ -791,15 +841,11 @@ class IMPORT_xtc(bpy.types.Operator):
 
         layer_mesh_map=split_xtc_layers()
 
-        debugpy.breakpoint()
-        pass # set other breakpoints, then continue
-
         bevel_info=panels_up_for_layer("level",layer_mesh_map,elevations)
         bi=panels_up_for_layer("inclined",layer_mesh_map,elevations)
         bevel_info.update(bi)
 
         bezier_controls=create_bezier_controls(layer_mesh_map,elevations)
-        debugpy.breakpoint()
         for bz_points in bezier_controls:
             create_bezier(bz_points)
         convert_to_meshes() # the beziers this time
@@ -825,8 +871,8 @@ class IMPORT_xtc(bpy.types.Operator):
         delete_objects_by_name(trimmers)             
 
         # debugpy.breakpoint()
-        # raise KeyboardInterrupt()          
-
+        #raise KeyboardInterrupt()
+    
         # do the bevels
         for name,info in bevel_info.items():
             logger.info(f"Beveling {name}")
