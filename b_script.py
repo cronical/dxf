@@ -6,6 +6,8 @@ from itertools import compress
 import logging
 import os
 from math import dist
+from pprint import pprint
+
 import bpy
 import bmesh
 import debugpy
@@ -405,6 +407,7 @@ def bevel(obj,center_xy_coords:np.array):
     """ Bevel the top outside edges.
     Locating these edges is the hard part.
     """
+    logger.info(f"Beveling {obj.name}")
     bpy.ops.object.select_all(action='DESELECT')
     obj.select_set(True)
     tol=.001
@@ -483,8 +486,8 @@ def bevel(obj,center_xy_coords:np.array):
     # this gets the ones created by the bezier curves
     ignore_vix=[]
     log_level=logging.INFO
-    if obj.name=='XTRKCAD17_curve_.001':
-        log_level=logging.DEBUG
+    # if obj.name=='XTRKCAD17_curve_.001':
+    #     log_level=logging.DEBUG
     logger.setLevel(log_level)
 
     for vix,edges in v2e_map.items():
@@ -541,75 +544,24 @@ def bevel(obj,center_xy_coords:np.array):
 
     bm.free()
 
-    # bpy.ops.object.mode_set(mode="EDIT")
-    # bpy.ops.mesh.select_mode(type='FACE')
-    # bpy.ops.mesh.select_all(action='DESELECT')
-    # bpy.ops.object.mode_set(mode="OBJECT") # in object mode, selection takes right away
-    # n=0
-    # for edge in obj.data.edges:
-    #     if edge.index in edges_to_select:
-    #         edge.select=True
-    #         n+=1
-    #     else:
-    #         edge.select=False
-    # logger.info(f"       {n} edges selected")
-    # bpy.ops.object.mode_set(mode="EDIT")
-    # bpy.ops.mesh.bevel(affect='EDGES',offset=0.1875 * SCALE)
-    # bpy.ops.mesh.select_mode(type='EDGE')
-    # bpy.ops.mesh.select_all(action='DESELECT')
-    # bpy.ops.object.mode_set(mode="OBJECT")
-
-
-def polarity_changes():
-    """ ** probably not needed **
-    After the panels are up, some of them are facing the wrong way
-    Returns a list of indicators as to whether each face changed polarity
-    Works on selected object, all faces.
-    First item is always False, 
-    Derived frrom:
-    https://blender.stackexchange.com/questions/87106/python-find-faces-with-incorrect-normals-to-flip-and-flip-them/87113#87113
-    """
-    bpy.ops.object.mode_set(mode="OBJECT")
-
-    me=bpy.context.object.data
-    bm = bmesh.new()
-    bm.from_mesh(me)
-
-    # Reference selected face indices
-    bm.faces.ensure_lookup_table()
-    face_indexes = [ f.index for f in bm.faces ]
-
-    if len(face_indexes)==0:
-        return []
-    result=[False]
-
-    prior_normal=bm.faces[face_indexes[0]].normal    
-    # Compare successively using the dot product tecnique
-    for i in face_indexes: 
-        if i==0:
-            continue
-        this_normal = bm.faces[i].normal
-
-        # Calculate the dot products between the this and prior face normal
-        dot =  prior_normal.dot(this_normal) 
-        result.append(dot<0) # Reversed faces have a negative dot product value
-    return result
-
 def create_bezier(control_points: list):
     """Set up a bezier curve
     control_points an ordered list of 4 x,y,z triplets in inches
     first and last are "anchor" points on the top of the level panels
     the middle two are the points where the incline stops (low,high)
-
+    returns new curve name
     modified from: https://blender.stackexchange.com/questions/296531/script-to-import-coordinates-and-create-a-bezier-curve
     """
     
     scale=.0254 # convert to meters
     assert len(control_points)==4,'Should have 4 control points'
     cpv=[scale * Vector(cp) for cp in control_points]
+
     # create bezier curve and add enough control points to it
     bpy.ops.curve.primitive_bezier_curve_add(enter_editmode=True)
     curve = bpy.context.active_object
+    curve_name=curve.name
+
     bez_points = curve.data.splines[0].bezier_points
 
     # note: a created bezier curve has already 2 control points
@@ -636,10 +588,10 @@ def create_bezier(control_points: list):
             bpt.select_control_point=False
 
     bpy.ops.object.mode_set(mode='OBJECT')
-    pass
+    return curve_name
 
 def solidify_roadbed():
-    """Solidfy the roadbed sections.  Expect panels are up. Returns list of roadbed names"""
+    """Solidfy the roadbed sections.  Expect panels are up. """
     bed_sections=[]
     logger.info ("Roadbed sections will be: ")    
     for obj in bpy.data.objects:
@@ -656,30 +608,30 @@ def solidify_roadbed():
             bpy.context.object.modifiers["Solidify"].offset = 0
             bpy.ops.object.modifier_apply(modifier="Solidify")
 
-def solidify_trimmers():
+def solidify_trimmers(trimmer_map):
     """Turn the bezier curves into a 3d block than can be used to trim the
-    roadbed along a grade. Returns list of trimmer names.
+    roadbed along a grade.
+    trimmer_map is dict of key: mesh_name, value: corresponding bezier curve name
     """
-    trimmers=[]
-    logger.info ("Trimmers will be: ")    
-    for obj in bpy.data.objects:
-        if obj.name.startswith("Bézier"):
-            trimmers.append(obj.name)
-            logger.info (f"{obj.name}")            
-            bpy.ops.object.select_all(action='DESELECT')
-            obj.select_set(True)
-            bpy.context.view_layer.objects.active = obj
-            logger.info(f"Selected and active: {obj.name}")   
-            bpy.ops.object.mode_set(mode='EDIT')
-            bpy.ops.mesh.select_all(action='SELECT')
-            bpy.ops.mesh.extrude_edges_move(TRANSFORM_OT_translate={"value":(0,0,.0254)}) # assume 1" is enough
-            bpy.ops.object.mode_set(mode='OBJECT')
-            bpy.ops.object.modifier_add(type='SOLIDIFY')
-            bpy.context.object.modifiers["Solidify"].solidify_mode="NON_MANIFOLD" # i.e. complex
-            bpy.context.object.modifiers["Solidify"].thickness = 3.5*.0254 # estimate wide enough to handle big curve
-            bpy.context.object.modifiers["Solidify"].offset = 0
-            bpy.ops.object.modifier_apply(modifier="Solidify")
-    return trimmers
+    logger.info ("Trimmers will be: ")
+    for mesh_name,bezier_name in trimmer_map.items():    
+        for obj in bpy.data.objects:
+            if obj.name == bezier_name:
+                logger.info (f"{obj.name} for {mesh_name}")            
+                bpy.ops.object.select_all(action='DESELECT')
+                obj.select_set(True)
+                bpy.context.view_layer.objects.active = obj
+                logger.info(f"Selected and active: {obj.name}")   
+                bpy.ops.object.mode_set(mode='EDIT')
+                bpy.ops.mesh.select_all(action='SELECT')
+                bpy.ops.mesh.extrude_edges_move(TRANSFORM_OT_translate={"value":(0,0,.0254)}) # assume 1" is enough
+                bpy.ops.object.mode_set(mode='OBJECT')
+                bpy.ops.object.modifier_add(type='SOLIDIFY')
+                bpy.context.object.modifiers["Solidify"].solidify_mode="NON_MANIFOLD" # i.e. complex
+                bpy.context.object.modifiers["Solidify"].thickness = 3.5*.0254 # estimate wide enough to handle big curve
+                bpy.context.object.modifiers["Solidify"].offset = 0
+                bpy.ops.object.modifier_apply(modifier="Solidify")
+    
 
 def merge_near_vertices():
     """ Merge vertices in the object when they are close
@@ -703,18 +655,6 @@ def merge_near_vertices():
 
     bm.free()
 
-
-
-
-            # obj=bpy.data.objects[mesh_name]
-            # bpy.ops.object.mode_set(mode='OBJECT')
-            # bpy.ops.object.select_all(action='DESELECT')
-            # obj.select_set(True)
-            # bpy.ops.object.mode_set(mode='EDIT')
-            # bpy.ops.mesh.select_mode(type='VERT')
-            # bpy.ops.mesh.select_all(action='SELECT')
-            # bpy.ops.mesh.remove_doubles(threshold= threshold)
-            # bpy.ops.object.mode_set(mode='OBJECT')
 
 def meshes_of_type(mesh_type):
     """Given a type of level or inclined, return list of mesh names"""
@@ -762,20 +702,20 @@ def create_bezier_controls(layer_mesh_map,elevations):
     For that we need heights from the adjoining level sections.
     there should a point at the same x,y in one of the level sections
     """
-    bezier_controls=[] # to determine the bezier points. each value is an ordered list of points
+    bezier_controls={} # key is the mesh name, each value is an ordered list of points
     tol=.001
-    for mesh_name in layer_mesh_map["inclined"]:
-        logger.info (f"Creating bezier control points for {mesh_name}")
-        obj=bpy.data.objects[mesh_name]
+    for inclined_name in layer_mesh_map["inclined"]:
+        logger.info (f"Creating bezier control points for {inclined_name}")
+        obj=bpy.data.objects[inclined_name]
         heights=height_for_vertex_set(obj.data.vertices,elevations,obj.matrix_world)
         bz_points=[]
         candidates=[] # for error reporting only
         for xy,height in heights.items():
             xyz=(xy[0],xy[1],height)
             logger.debug(f"    looking for {xyz} in level meshes")
-            for mesh_name in meshes_of_type("level"):
-                mesh=bpy.data.objects[mesh_name]
-                logger.debug(f"      {len(mesh.data.edges)} edges in {mesh_name}")
+            for level_name in meshes_of_type("level"):
+                mesh=bpy.data.objects[level_name]
+                logger.debug(f"      {len(mesh.data.edges)} edges in {level_name}")
                 bz=[]
                 for edge in mesh.data.edges:
                     vcs=[]
@@ -806,7 +746,7 @@ def create_bezier_controls(layer_mesh_map,elevations):
             # for candidate in candidates:
             #     log.error(f"  {candidate}")
         else:
-            bezier_controls.append(bz_points)
+            bezier_controls[inclined_name]=(bz_points)
     return bezier_controls
 
 class IMPORT_xtc(bpy.types.Operator):
@@ -846,29 +786,31 @@ class IMPORT_xtc(bpy.types.Operator):
         bevel_info.update(bi)
 
         bezier_controls=create_bezier_controls(layer_mesh_map,elevations)
-        for bz_points in bezier_controls:
-            create_bezier(bz_points)
+        pprint(bezier_controls)
+        trimmer_map={}
+        for mesh_name,bz_points in bezier_controls.items():
+            trimmer_map[mesh_name]=create_bezier(bz_points)
+        
         convert_to_meshes() # the beziers this time
 
-        _=solidify_roadbed()
+        solidify_roadbed()
        
-        trimmers=solidify_trimmers()
+        solidify_trimmers(trimmer_map)
 
         # do the trim and discard the trim tools
-
-        for name in meshes_of_type("inclined"):
-            obj=bpy.data.objects[name]
-            for trimmer in trimmers:
-                bpy.ops.object.select_all(action='DESELECT')
-                obj.select_set(True)
-                bpy.context.view_layer.objects.active = obj
-                bpy.ops.object.modifier_add(type='BOOLEAN')
-                mname=obj.modifiers[-1].name
-                bpy.context.object.modifiers[mname].object=bpy.data.objects[trimmer] 
-                bpy.context.object.modifiers[mname].operation = "DIFFERENCE"
-                bpy.context.object.modifiers[mname].use_self=True
-                bpy.ops.object.modifier_apply(modifier=mname)
-        delete_objects_by_name(trimmers)             
+        for mesh_name,trimmer in trimmer_map.items():
+            obj=bpy.data.objects[mesh_name]
+            logger.info(f"Trimming {obj.name} using trimmer: {trimmer}")
+            bpy.ops.object.select_all(action='DESELECT')
+            obj.select_set(True)
+            bpy.context.view_layer.objects.active = obj
+            bpy.ops.object.modifier_add(type='BOOLEAN')
+            mname=obj.modifiers[-1].name
+            bpy.context.object.modifiers[mname].object=bpy.data.objects[trimmer] 
+            bpy.context.object.modifiers[mname].operation = "DIFFERENCE"
+            bpy.context.object.modifiers[mname].use_self=True
+            bpy.ops.object.modifier_apply(modifier=mname)
+            delete_objects_by_name([trimmer])             
 
         # debugpy.breakpoint()
         #raise KeyboardInterrupt()
