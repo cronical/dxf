@@ -44,23 +44,23 @@ def vertex_coordinates(vert:bpy.types.MeshVertex,matrix_world:Matrix)->tuple:
     scale = 39.370079 # inches per meter
     return scale * matrix_world @ vert.co    
 
-def get_z(vert:bpy.types.MeshVertex,elevations:np.array,matrix_world:Matrix)->float:
-    """Given a vertex, vert
+def get_z(coords,elevations:np.array,matrix_world:Matrix,context="")->float:
+    """Given the coordinates of a vertex, coords
     the end_point array - passed as a numpy array
     the matrix world from the object holding the vertex:
     Check vertex against imported data to locate z value (within a tolerance)
     Return the xy,z value if found, otherwise None
     The xy value is from the vertex (not the elevation file)
     """
-    coords = vertex_coordinates(vert,matrix_world).xy
-
     # matching tolerance to that used to merge near vertices.
     tolm=.003 # meters
     tol= tolm / SCALE
     vectors=[Vector(elevations[i,:]).xy for i in range(len(elevations))]
-    distance=[dist(v,coords) for v in vectors]
+    distance=[dist(v,coords.xy) for v in vectors]
     sel=[d<tol for d in distance]
     if sum(sel)==0:
+        if min(distance)< 0.5:
+            show_misses(coords,vectors,distance,context)
         return None
     # if more than one take the one closest
     d=list(compress(distance,sel))
@@ -119,6 +119,28 @@ def nearly_in(coord:Vector,search_in):
     sel=np.isclose(all_coords,c,atol=0.01)
     return any(sel)
 
+def end_points():
+    """ For all objects returns dict of object name and coordinates of vertices with just one edge. 
+    To be run before panels are raised.
+    """
+    bm = bmesh.new()
+    end_points_map={}
+    for obj in bpy.data.objects:
+        verts=[]
+        bm.from_mesh(obj.data)
+        bm.verts.ensure_lookup_table()
+        bm.edges.ensure_lookup_table()
+
+        for vert in bm.verts:
+            if len(vert.link_edges)==1:
+                verts.append(vert.co / SCALE)
+        end_points_map[obj.name]=verts
+        if len(verts)==0:
+            debugpy.breakpoint()    
+        pass
+        bm.clear()
+    bm.free()
+    return end_points_map
 
 def panel_info(obj):
     """ Returns coordinates of base (z=0) vertices from the end faces. 
@@ -241,7 +263,7 @@ def heights_for_obj(obj:bpy.types.Object,elevations:np.array)->dict:
     for vert in mesh.vertices:
         if obj.name=="XTRKCAD3_curve_.003":
             debugpy.breakpoint()
-        xyz=get_z(vert,elevations=elevations,matrix_world=obj.matrix_world)
+        xyz=get_z(vert,elevations=elevations,matrix_world=obj.matrix_world,context="heights for object")
         if xyz is None:
             continue
         xy,z=xyz
@@ -295,14 +317,15 @@ def save_file(filepath):
     #bpy.ops.wm.save_as_mainfile(filepath= filepath)
     pass
 
-def height_for_vertex_set(vertices:bpy.types.MeshVertices,elevations:np.array,matrix_world:Matrix) ->dict:
-    """Determine the height(s) for a vertex set
+def height_for_vertex_set(coords,elevations:np.array,matrix_world:Matrix) ->dict:
+    """Determine the height(s) for a list of coordinates by
+    locating the coordinates in the elevations table within tolerance defined in get_z
     Returns dict with xy as key and z as value
     Could be 1 or two items for level or inclined.
     """
     found={}
-    for vert in vertices:
-        xyz=get_z(vert,elevations=elevations,matrix_world=matrix_world)
+    for coord in coords:
+        xyz=get_z(coord,elevations=elevations,matrix_world=matrix_world,context="in heights for vertex set")
         if xyz is None:
             continue
         xy,z=xyz
@@ -329,6 +352,9 @@ def extrude_to_height(obj:bpy.types.Object,heights:dict,layer:str):
     scaled_height=height * SCALE # got to be a better way to scale
     for edge in obj.data.edges:
         edge.select = True
+    if '17_curve_.009' in obj.name:
+        debugpy.breakpoint()
+        pass
     bpy.ops.object.mode_set(mode='EDIT')
     bpy.ops.mesh.extrude_edges_move(TRANSFORM_OT_translate={"value":(0,0,scaled_height)}) 
     bpy.ops.mesh.select_all(action='DESELECT')
@@ -683,7 +709,7 @@ def split_xtc_layers():
             layer_obj_map[layer] = separate_sections(obj,clusters)
     return layer_obj_map
 
-def panels_up_for_layer(layer,layer_mesh_map,elevations):  
+def panels_up_for_layer(layer,layer_mesh_map,elevations,end_point_map):  
     """Raise the panels for all meshes associated with a layer
     returns a dict of object names: panel info
     """
@@ -691,13 +717,28 @@ def panels_up_for_layer(layer,layer_mesh_map,elevations):
     for mesh_name in layer_mesh_map[layer]:
         logger.info (f"  Putting up panels for {mesh_name}")
         obj=bpy.data.objects[mesh_name]
-        heights=height_for_vertex_set(obj.data.vertices,elevations,obj.matrix_world)
+        coords=end_point_map[mesh_name]
+        heights=height_for_vertex_set(coords,elevations,obj.matrix_world)
         extrude_to_height(obj,heights,layer)
         info=panel_info(obj)
         bevel_info[obj.name]=info # do bevels after all sections are up, solid & trimmed
     return bevel_info
 
-def create_bezier_controls(layer_mesh_map,elevations):
+def show_misses(xyz,candidates,away,context):
+    """display up to 5 misses sorted by distance when looking for a coordinate
+    xyz is the single point, candidates are all the items that were checked,
+    away is how far away they were from xyz
+    context is added to the message"""
+    logger.error(f"Looking for {xyz} {context}")
+    logger.error(f"The best candidates out of {len(candidates)} are: ")
+    z=tuple(zip(candidates,away))
+    z=sorted(z,key=lambda x: x[1])
+    for i,(c,d) in enumerate(z):
+        if i>5:
+            break
+        logger.error (f"Candidate {c}   Distance: {d}")
+
+def create_bezier_controls(layer_mesh_map,elevations,end_point_map):
     """For the inclined layer create a bezier curve.  
     For that we need heights from the adjoining level sections.
     there should a point at the same x,y in one of the level sections
@@ -707,11 +748,14 @@ def create_bezier_controls(layer_mesh_map,elevations):
     for inclined_name in layer_mesh_map["inclined"]:
         logger.info (f"Creating bezier control points for {inclined_name}")
         obj=bpy.data.objects[inclined_name]
-        heights=height_for_vertex_set(obj.data.vertices,elevations,obj.matrix_world)
+        coords=end_point_map[inclined_name]
+        heights=height_for_vertex_set(coords,elevations,obj.matrix_world)
         bz_points=[]
         candidates=[] # for error reporting only
+        debugpy.breakpoint()
         for xy,height in heights.items():
             xyz=(xy[0],xy[1],height)
+            found=False
             logger.debug(f"    looking for {xyz} in level meshes")
             for level_name in meshes_of_type("level"):
                 mesh=bpy.data.objects[level_name]
@@ -720,10 +764,12 @@ def create_bezier_controls(layer_mesh_map,elevations):
                 for edge in mesh.data.edges:
                     vcs=[]
                     near=[]
+                    away=[]
                     for ev in edge.vertices:
                         vc=tuple(vertex_coordinates(mesh.data.vertices[ev],mesh.matrix_world ))
                         vcs.append(vc)
-                        near.append(dist(xyz,vc)<tol)
+                        away.append(dist(xyz,vc))
+                        near.append(away[-1]<tol)
                     if vcs[0][2]!=vcs[1][2]: # not on same level
                         continue
                     if vcs[0][2]==0: # only consider the ones at non zero height
@@ -739,12 +785,14 @@ def create_bezier_controls(layer_mesh_map,elevations):
                         break # done, no more edges needed for this side of the bezier curve
                 logger.debug(f"      {len(bz_points)} Bezier points")
                 if len(bz)==2: # this side of the curve is satisfied by the most recent mesh
+                    found=True
                     break
+            if not found:
+                show_misses(xyz,candidates,away,"in level meshes")
         if len(bz_points)!=4: # all meshes used up and we still don't have a match
             logger.error(f"Could not create bezier control.  Need 4 points but have {len(bz_points)}")
-            logger.error("The candidates can be seen by uncommenting the next lines: ")
-            # for candidate in candidates:
-            #     log.error(f"  {candidate}")
+
+                
         else:
             bezier_controls[inclined_name]=(bz_points)
     return bezier_controls
@@ -780,13 +828,14 @@ class IMPORT_xtc(bpy.types.Operator):
         merge_near_vertices()
 
         layer_mesh_map=split_xtc_layers()
-
-        bevel_info=panels_up_for_layer("level",layer_mesh_map,elevations)
-        bi=panels_up_for_layer("inclined",layer_mesh_map,elevations)
+        end_point_map=end_points()
+        debugpy.breakpoint()
+        bevel_info=panels_up_for_layer("level",layer_mesh_map,elevations,end_point_map)
+        bi=panels_up_for_layer("inclined",layer_mesh_map,elevations,end_point_map)
         bevel_info.update(bi)
 
-        bezier_controls=create_bezier_controls(layer_mesh_map,elevations)
-        pprint(bezier_controls)
+        bezier_controls=create_bezier_controls(layer_mesh_map,elevations,end_point_map)
+
         trimmer_map={}
         for mesh_name,bz_points in bezier_controls.items():
             trimmer_map[mesh_name]=create_bezier(bz_points)
