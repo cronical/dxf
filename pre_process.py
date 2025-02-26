@@ -5,7 +5,7 @@ import ezdxf
 #from ezdxf.math import ConstructionArc
 
 try:
-    doc = ezdxf.readfile("data/small.dxf")
+    doc = ezdxf.readfile("data/more.dxf")
 except IOError:
     print("Not a DXF file or a generic I/O error.")
     sys.exit(1)
