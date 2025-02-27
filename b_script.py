@@ -169,53 +169,6 @@ def panel_info(obj):
         logger.debug(co)
     return coordinates
 
-def merge_sections(sections):       
-    """ Merge sections which contain close points
-    close items occur where the imported curves don't quite align
-    and where they align but don't share a vertex (like switches)
-    example shows .01 is adequate threshhold
-    treat the xy pair as a complex number and see which points are close.
-
-    """
-    all_coords=np.array([],dtype=complex)
-    all_sections=[]
-    coords_by_section=[]
-    for ix,section in enumerate(sections):    
-        sec_coords=[s[1] for s in section]
-        c=[complex(a[0],a[1]) for a in sec_coords]
-        all_coords=np.concatenate((all_coords,c))
-        all_sections+=[ix]*len(c)
-        coords_by_section.append(c)
-
-    sibling_groups=[]
-    for ix,section_coords in enumerate(coords_by_section):
-        if any(ix in sg for sg in sibling_groups):
-            continue
-        siblings=set()
-        for coord in section_coords:
-            sel=np.isclose(all_coords,coord,atol=0.01)
-            near=set(compress(all_sections,sel))
-            siblings=siblings.union(near)
-        # check to see if the sibling set has any members in prior sets
-        # in which case update that set. Otherwise create a new set
-        net_new=True
-        for sg in sibling_groups:
-            if sg.isdisjoint(siblings):
-                net_new=True
-                continue # no match here, try the next one
-            else:
-                sg.update(siblings)
-                net_new=False
-                break # this sibling set has been consumed (subsumed into another)
-        if net_new:
-            sibling_groups.append(siblings)
-    grouped=[]
-    for sg in sibling_groups:
-        group=set()
-        for ix in sg:
-            group.update(sections[ix])
-        grouped.append(group)
-    return grouped
 def cluster_vertices_bmesh(obj):
     """Cluster all the vertices into several sets based on whether they are linked, working with bmesh.
     Returns a list of sets of vertex info.
@@ -265,43 +218,6 @@ def walk_connected(root_vert,section:int,vert_section_map:dict)->dict:
             vert_section_map=walk_connected(vert,section,vert_section_map)
     return vert_section_map
 
-def cluster_vertices_bpy(obj):
-    """ REPLACED BY bmesh version
-    Cluster all the vertices into several sets based on whether they are linked, working with bpy.
-    Returns a list of sets of vertex info.
-    The info is index, coordinates. 
-    The sets are mutually exclusive (unlike vertex groups)
-    These sets then represent the sections of track in a layer (level or inclined) 
-    that are isolated from other sections in the same layer by sections of the other layer.
-    This is intended to run only on an object that has not yet been extruded - i.e. 2 dimensional.
-    """
-    mesh = obj.data
-    matrix=obj.matrix_world
-    all_vertices=mesh.vertices
-    bpy.ops.object.mode_set(mode='OBJECT')
-    sections=[]
-
-    # Loop through all edges in the mesh and create sections based on 
-    # edges sharing the same vertex
-    # then merge the sections when there is a point that is close in two sections
-    for edge in mesh.edges:
-        vert_ix=edge.vertices 
-        assert 2==len(vert_ix)
-        co=[vertex_coordinates(all_vertices[x],matrix).freeze() for x in vert_ix]
-        vertex_info=list(zip(vert_ix,co))
-        section_assigned=False
-        for section in sections:
-            sel= vertex_info[0][0]in [s[0] for s in section]# check index
-            if sel:# already in a section, so the other end will go there too
-                section.add(vertex_info[1])
-                section_assigned=True
-                break
-        if section_assigned is False:
-            sections.append(set(vertex_info))
-    debugpy.breakpoint()
-    clusters=merge_sections(sections)    
-    pass    
-    return clusters
 
 def heights_for_obj(obj:bpy.types.Object,elevations:np.array)->dict:
     """Get the defined heights for an object
