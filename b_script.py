@@ -216,9 +216,58 @@ def merge_sections(sections):
             group.update(sections[ix])
         grouped.append(group)
     return grouped
+def cluster_vertices_bmesh(obj):
+    """Cluster all the vertices into several sets based on whether they are linked, working with bmesh.
+    Returns a list of sets of vertex info.
+    The info is index, coordinates. 
+    The sets are mutually exclusive (unlike vertex groups)
+    These sets then represent the sections of track in a layer (level or inclined) 
+    that are isolated from other sections in the same layer by sections of the other layer.
+    This is intended to run only on an object that has not yet been extruded - i.e. 2 dimensional.
+    """
+    me = obj.data
+    matrix=obj.matrix_world
+    bm = bmesh.new()
+    me=obj.data
+    bm.from_mesh(me)
+    bm.verts.ensure_lookup_table()
+    bm.edges.ensure_lookup_table()
+    vert_section_map={}
+    next_section=0
+    # assign every vertex to a section
+    for vert in bm.verts:
+        if vert.index in vert_section_map.keys():
+            continue
+        this_section=next_section
+        vert_section_map[ vert.index]=this_section
+        vert_section_map=walk_connected(vert,this_section,vert_section_map)
+        next_section+=1
+    # covert to lists of info
+    sections=[]
+    for _ in range(next_section):
+        sections.append([])
+    for vix,section_ix in vert_section_map.items():
+        co=vertex_coordinates(bm.verts[vix],matrix)
+        info=(vix,co.freeze())
+        sections[section_ix].append(info)
+    return sections
 
-def cluster_vertices(obj):
-    """Cluster all the vertices into several sets based on whether they are linked.
+
+def walk_connected(root_vert,section:int,vert_section_map:dict)->dict:
+    """Recursively walk the section from root_vert, adding vertices to this section
+    returns revised vert-section_map
+    """
+    for le in root_vert.link_edges:
+        for vert in le.verts:
+            if vert.index in vert_section_map:
+                continue
+            vert_section_map[vert.index]=section
+            vert_section_map=walk_connected(vert,section,vert_section_map)
+    return vert_section_map
+
+def cluster_vertices_bpy(obj):
+    """ REPLACED BY bmesh version
+    Cluster all the vertices into several sets based on whether they are linked, working with bpy.
     Returns a list of sets of vertex info.
     The info is index, coordinates. 
     The sets are mutually exclusive (unlike vertex groups)
@@ -249,7 +298,7 @@ def cluster_vertices(obj):
                 break
         if section_assigned is False:
             sections.append(set(vertex_info))
-    # debugpy.breakpoint()
+    debugpy.breakpoint()
     clusters=merge_sections(sections)    
     pass    
     return clusters
@@ -261,8 +310,6 @@ def heights_for_obj(obj:bpy.types.Object,elevations:np.array)->dict:
     mesh=obj.data
     found={}
     for vert in mesh.vertices:
-        if obj.name=="XTRKCAD3_curve_.003":
-            debugpy.breakpoint()
         xyz=get_z(vert,elevations=elevations,matrix_world=obj.matrix_world,context="heights for object")
         if xyz is None:
             continue
@@ -352,9 +399,7 @@ def extrude_to_height(obj:bpy.types.Object,heights:dict,layer:str):
     scaled_height=height * SCALE # got to be a better way to scale
     for edge in obj.data.edges:
         edge.select = True
-    if '17_curve_.009' in obj.name:
-        debugpy.breakpoint()
-        pass
+
     bpy.ops.object.mode_set(mode='EDIT')
     bpy.ops.mesh.extrude_edges_move(TRANSFORM_OT_translate={"value":(0,0,scaled_height)}) 
     bpy.ops.mesh.select_all(action='DESELECT')
@@ -408,7 +453,6 @@ def disolve_over_used_verts(bm):
     that create the frog.  Possibly could split the lines at the frog.)
     This is to remove anomolies caused by switches.
     """
-    debugpy.breakpoint()
     verts=list(bm.verts) # make a copy since we will be removing some
     for vert in verts:
         le=set(vert.link_edges)
@@ -441,7 +485,7 @@ def bevel(obj,center_xy_coords:np.array):
     me=obj.data
     bm.from_mesh(me)
     bm.verts.ensure_lookup_table()
-    bm.verts.ensure_lookup_table()
+    bm.edges.ensure_lookup_table()
     logger.info(f"Finding edges to bevel for {obj.name}")
     logger.info(f"  There are are {len(bm.edges)} edges")
     edges_to_select=set()
@@ -665,7 +709,7 @@ def merge_near_vertices():
     This should eliminate the gaps by merging near points
     https://blender.stackexchange.com/questions/68093/remove-doubles-on-multiple-objects
     """
-    threshold=0.003# in meters (about 1/8 inch)
+    threshold=0.00486# in meters (about 3/16 inch)
     
     objs = set(o for o in bpy.context.scene.objects if o.type == 'MESH')
     bm = bmesh.new()
@@ -705,7 +749,7 @@ def split_xtc_layers():
         if obj.type == 'MESH':
             logger.info(f"Splitting layer: {obj.name}")
             layer=XTC_LAYER_TYPES[obj.name]
-            clusters=cluster_vertices(obj)
+            clusters=cluster_vertices_bmesh(obj)
             layer_obj_map[layer] = separate_sections(obj,clusters)
     return layer_obj_map
 
@@ -752,7 +796,6 @@ def create_bezier_controls(layer_mesh_map,elevations,end_point_map):
         heights=height_for_vertex_set(coords,elevations,obj.matrix_world)
         bz_points=[]
         candidates=[] # for error reporting only
-        debugpy.breakpoint()
         for xy,height in heights.items():
             xyz=(xy[0],xy[1],height)
             found=False
@@ -825,11 +868,13 @@ class IMPORT_xtc(bpy.types.Operator):
         import_dxf_file(DATA_FOLDER+"revised.dxf")
 
         convert_to_meshes()
+
         merge_near_vertices()
 
         layer_mesh_map=split_xtc_layers()
+
         end_point_map=end_points()
-        debugpy.breakpoint()
+
         bevel_info=panels_up_for_layer("level",layer_mesh_map,elevations,end_point_map)
         bi=panels_up_for_layer("inclined",layer_mesh_map,elevations,end_point_map)
         bevel_info.update(bi)
@@ -861,8 +906,7 @@ class IMPORT_xtc(bpy.types.Operator):
             bpy.ops.object.modifier_apply(modifier=mname)
             delete_objects_by_name([trimmer])             
 
-        # debugpy.breakpoint()
-        #raise KeyboardInterrupt()
+
     
         # do the bevels
         for name,info in bevel_info.items():
