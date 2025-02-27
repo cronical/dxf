@@ -256,11 +256,26 @@ def read_track_coordinates(filepath):
 def new_blender_file():
     """open a new file and delete the default objects"""
     # temp - next line commented to allow use of debugger
-    #bpy.ops.wm.read_homefile(app_template="")
+    # bpy.ops.wm.read_homefile(app_template="")
 
     # Cleaning the scene
     bpy.ops.object.select_all(action='SELECT')
-    bpy.ops.object.delete(use_global=True)    
+    bpy.ops.object.delete(use_global=True)
+
+def add_base():
+    """Adds a new object to represent the base foam
+    """
+    # keep the cube and set it to
+    # location x,y,z = (120,52.5,0.375)
+    # dimenisons = (240,105,0.75)
+
+    bpy.ops.mesh.primitive_cube_add(location=Vector((120,52.5,0.375)) * SCALE)
+    for obj in bpy.data.objects:
+        if obj.name=='Cube':
+            obj.dimensions=Vector((240,105,0.75)) * SCALE
+
+            
+        
 
 def import_dxf_file(filepath):
     """Import the named dxf file from the data folder
@@ -830,7 +845,8 @@ class IMPORT_xtc(bpy.types.Operator):
             obj=bpy.data.objects[name]
             bevel(obj,info)
               
-
+        add_base()
+        
         pass
 
         save_file(f"{DATA_FOLDER}script_generated.blend")
