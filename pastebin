@@ -1,0 +1,10 @@
+import bmesh, bpy
+obj=bpy.data.objects["XTRKCAD3_curve_.001"]
+bm=bmesh.from_edit_mesh(obj.data)
+cnt=0
+for edge in bm.edges:
+    if edge.select:
+        print(edge)
+        cnt=cnt+1
+        
+print(cnt)
