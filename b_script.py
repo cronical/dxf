@@ -2,10 +2,10 @@
 Run inside of Blender
 
 """
-from itertools import compress
+from itertools import compress, combinations
 import logging
 import os
-from math import dist
+from math import dist, radians, cos, degrees, acos
 from pprint import pprint
 
 import bpy
@@ -14,6 +14,7 @@ import debugpy
 from mathutils import Matrix, Vector
 from mathutils import geometry 
 import numpy as np
+from shapely import LineString,Point, dwithin
 
 
 logger = logging.getLogger(__name__)
@@ -36,7 +37,17 @@ XTC_LAYER_TYPES={"XTRKCAD3_curve_":"level","XTRKCAD17_curve_":"inclined"}
 LAYER_TYPES_TO_XTC={v: k for k, v in XTC_LAYER_TYPES.items()}
 
 SCALE=0.0254 # inches
-HALF_WIDTH=0.9375 # half of the roadbed width
+BEVEL=0.1875
+ROADBED_WIDTH= 13/8 #  the roadbed width at the bottom
+# full width references:
+# 33mm * 0.03937 # 33MM convert to inches.ref: https://www.greenstuffworld.com/18124-large_default/h0-cork-roadbed.jpg
+# 1.75" ref: https://midwestmodelrr.com/mid3013/ 
+
+# allowed variation from perpendicular in degrees translated into number between 0 and 1 commensurate with dot products
+TOL_PERPENDICULAR=cos(radians(86)) # this close to 90 degrees
+logger.debug(f"perpendicular tolerance: {TOL_PERPENDICULAR}")
+TOL_COLINEAR=cos(radians(4)) # this close to 0 degrees. Have seen 178.573309 degrees near infection point on S curve.
+logger.debug(f"colinear tolerance: {TOL_COLINEAR}")
 
 def vertex_coordinates(vert:bpy.types.MeshVertex,matrix_world:Matrix)->tuple:
     """Return the x,y coordinates of a vertex as a tuple of floats
@@ -136,8 +147,7 @@ def end_points():
                 verts.append(vert.co / SCALE)
         end_points_map[obj.name]=verts
         if len(verts)==0:
-            debugpy.breakpoint()    
-        pass
+            pass
         bm.clear()
     bm.free()
     return end_points_map
@@ -193,7 +203,7 @@ def cluster_vertices_bmesh(obj):
             continue
         this_section=next_section
         vert_section_map[ vert.index]=this_section
-        vert_section_map=walk_connected(vert,this_section,vert_section_map)
+        vert_section_map=walk_connected_by_edge(vert,this_section,vert_section_map)
         next_section+=1
     # covert to lists of info
     sections=[]
@@ -206,7 +216,7 @@ def cluster_vertices_bmesh(obj):
     return sections
 
 
-def walk_connected(root_vert,section:int,vert_section_map:dict)->dict:
+def walk_connected_by_edge(root_vert,section:int,vert_section_map:dict)->dict:
     """Recursively walk the section from root_vert, adding vertices to this section
     returns revised vert-section_map
     """
@@ -215,8 +225,69 @@ def walk_connected(root_vert,section:int,vert_section_map:dict)->dict:
             if vert.index in vert_section_map:
                 continue
             vert_section_map[vert.index]=section
-            vert_section_map=walk_connected(vert,section,vert_section_map)
+            vert_section_map=walk_connected_by_edge(vert,section,vert_section_map)
     return vert_section_map
+def fmt_coords(both_cos):
+    "easier to read format for coordinates"
+    co_fmt=[]
+    for co in both_cos:
+        a=", ".join([f"{n:.4f}" for n in co])
+        co_fmt.append(f"({a})")
+    cos=' '.join(co_fmt)
+    return cos
+
+def walk_boundary_edges(bm,root_edge,chain:int,edge_chain_map:dict,frog_points,other_root_edge_indexes,logging_level=logging.INFO)->dict:
+    """In the bmesh bm, recursively walk the boundary from root_edge, adding edges to this chain
+    frog_points are a list of shapely points used to stop the walk.
+    other_root_edge_indexes are also used to stop the walk.
+    returns revised edge_chain_map
+    """
+    if root_edge.index in other_root_edge_indexes:
+        logger.debug(f"    Stopping at edge {root_edge.index} which is an track end")
+        return edge_chain_map
+    
+    edge_chain_map[root_edge.index]=chain
+
+    both_cos=[(v.co / SCALE).freeze() for v in root_edge.verts] 
+    length=dist(both_cos[0],both_cos[1])
+    cos=fmt_coords(both_cos)
+    logger.debug (f"    Chain {chain}: Added {root_edge.index}: {cos} length {length:.4f} ")
+
+    for dix,vert in enumerate(root_edge.verts): # go both directions
+        (a,b)=vert.co.xy/SCALE
+        pt=Point(a,b)
+        logger.debug(f"  direction {dix} from {pt.x:.3f}, {pt.y:.3f}")
+        #determine if we have hit a frog point
+        mtch=False
+        for fp in frog_points:
+            if pt.equals_exact(fp,.001):
+                mtch=True
+        if mtch:
+            logger.debug(f"    Stopping at frog point {pt}")
+            continue
+
+        (perp,colin,_)=typed_edges_for_vert_relative(bm,vert.index,root_edge.index,logging_level=logging_level)
+        logger.setLevel(logging.DEBUG)# TODO remove this line
+        next_edge_ix=None
+        if len(colin)==2:
+            ne=set(colin) - set([root_edge.index])
+            next_edge_ix=ne.pop()
+        else:
+            if len(perp)==1:
+                logger.debug(f"    Turning corner at {pt}")
+                next_edge_ix=perp[0]
+
+            if len(perp)>1: # "Unexpected multiple perpendiculars"
+                pass
+
+
+        if next_edge_ix is not None:
+            if next_edge_ix not in edge_chain_map.keys():
+
+                next_edge=bm.edges[next_edge_ix]
+                edge_chain_map=walk_boundary_edges(bm,next_edge,chain,edge_chain_map,frog_points,other_root_edge_indexes,logging_level)
+    return edge_chain_map
+
 
 
 def heights_for_obj(obj:bpy.types.Object,elevations:np.array)->dict:
@@ -269,12 +340,15 @@ def add_base():
     # location x,y,z = (120,52.5,0.375)
     # dimenisons = (240,105,0.75)
 
-    bpy.ops.mesh.primitive_cube_add(location=Vector((120,52.5,0.375)) * SCALE)
+    y_offset=29
+    x=14
+    y=60
+    height= 5 / 8 # height off table
+
+    bpy.ops.mesh.primitive_cube_add(location=Vector((x/2,y_offset+y/2,height/2)) * SCALE)
     for obj in bpy.data.objects:
         if obj.name=='Cube':
-            obj.dimensions=Vector((240,105,0.75)) * SCALE
-
-            
+            obj.dimensions=Vector((x,y,height)) * SCALE
         
 
 def import_dxf_file(filepath):
@@ -402,108 +476,44 @@ def disolve_over_used_verts(bm):
             logger.info(f"Will disolve vertex at {co} ")
             success=bmesh.utils.vert_dissolve(vert)
             logger.info(f"disolve returned {success}")
-    
+def links_to_edge(e):
+    le=set() # indexes of all the linked edges for either vertex
+    for v in e.verts:
+        for vle in v.link_edges:
+            le.add(vle.index)
+    return le
 
-def bevel(obj,center_xy_coords:np.array):
-    """ Bevel the top outside edges.
-    Locating these edges is the hard part.
+def find_crossing_edges(bm,top_edges):
+    """locate the crossing edges using dot product.
+    bm is the bmesh for the object.  top_edges is a subset of bm.edges that are on the top.
+    Returns the set of the edges that cross side to side.
+    To do this it finds the verticies that have 3 edges and works out the angles between pairs.
+    The crossing ones will be nearly perpendicular to the other two.
     """
-    logger.info(f"Beveling {obj.name}")
-    bpy.ops.object.select_all(action='DESELECT')
-    obj.select_set(True)
-    tol=.001
-    bm = bmesh.new()
-    me=obj.data
-    bm.from_mesh(me)
-    bm.verts.ensure_lookup_table()
-    bm.edges.ensure_lookup_table()
-    logger.info(f"Finding edges to bevel for {obj.name}")
-    logger.info(f"  There are are {len(bm.edges)} edges")
-    edges_to_select=set()
-    v2e_map={} # key index of vertex, values is list of up to 3 edge indices
-    # disolve_over_used_verts(bm)
-    # bm.to_mesh(me)
-    # me.update()
-    # bm.verts.ensure_lookup_table()
-    # bm.edges.ensure_lookup_table()
-
-    top_edges=[e for e in bm.edges if is_edge_on_top(e)]
-    bm.verts.ensure_lookup_table()
-    bm.edges.ensure_lookup_table()
-    
-    # if '.002' in obj.name:
-    #     for e in bm.edges:
-    #         if e in top_edges:
-    #             e.select=True
-    #         else:
-    #             e.select=False
-        
-    #     bm.to_mesh(me)
-    #     me.update()
-    #     bm.clear()
-
-    #     bm.free()
-    #     raise KeyboardInterrupt()
-
-
+    # make a dict with key index of vertex, values is list of edge indices
+    v2e_map={} 
     for edge in top_edges:
-
-        # eliminate crossing edges
-        top_cos=[]
-        for v in edge.verts:
-            top_cos.append(v.co / SCALE)
-        if dist(top_cos[0],top_cos[1])<tol: # bizzarely close edges seen which caused intersect None
-            continue # just ignore
-
-        # intercept method - works for level areas and the ends of the inclined ares
-        cross_center=False
-        for pole_bot in center_xy_coords:
-            height=1+max([co.z for co in top_cos])
-            pole_top =Vector((pole_bot.x,pole_bot.y,height))
-            intersect=geometry.intersect_line_line(top_cos[0],top_cos[1],pole_bot,pole_top)
-            if intersect is None:# should never be colinear and thus never None
-                logger.error("Intersect method produced a None")
-                logger.error(f"Pole: {pole_bot,pole_top}")
-                logger.error(f"Top: {top_cos}")
-                continue
-            d=dist(intersect[0],intersect[1])
-            if d<tol: 
-                logger.debug(f"        Edge {edge.index} crossses center")
-                cross_center=True
-                break
-            else:
-                continue
-        if cross_center:
-            continue # go on to next edge
-        edges_to_select.add(edge.index)
         for vert in edge.verts:
             if vert.index in v2e_map:
                 v2e_map[vert.index].append(edge.index)
             else:
                 v2e_map[vert.index]=[edge.index]
-        logger.debug ("         Edge tentatively selected")
 
-    # remove the crossing edges using dot product
-    # this gets the ones created by the bezier curves
     ignore_vix=[]
-    log_level=logging.INFO
-    # if obj.name=='XTRKCAD17_curve_.001':
-    #     log_level=logging.DEBUG
-    logger.setLevel(log_level)
-
-    for vix,edges in v2e_map.items():
+    crossing_edges=set()
+    for vix,edge_ixs in v2e_map.items():
         if vix in ignore_vix: # way to ignore other side of deleted edges
             continue
-        if len(edges)!=3:
+        if len(edge_ixs)!=3:
             continue
         shared_co=(bm.verts[vix].co /SCALE).freeze()
         vectors=[]
-        logger.debug("Edges")
-        for ix in edges: # convert the edges to vectors
+        logger.log(5,"Edges")
+        for ix in edge_ixs: # convert the edges to vectors
             edge=bm.edges[ix]
             # remove the common point all are direction from (0,0,0)
             both_cos=[(v.co / SCALE).freeze() for v in edge.verts]            
-            logger.debug(f"{ix}: {both_cos}")
+            logger.log(5,f"{ix}: {both_cos}")
             other_co=list(set(both_cos)-{shared_co})[0] # the coordinates of the non-common point
             length=dist(shared_co,other_co) # used to scale to get unit vectors
             vector=other_co-shared_co # center at (0,0,0)
@@ -511,39 +521,501 @@ def bevel(obj,center_xy_coords:np.array):
             vectors.append(vector)
         logger.debug("Vectors")
         for v in vectors:
-            logger.debug(v)
+            logger.log(5,v)
         pairs=(0,1),(0,2),(1,2) # the three possible pairings
         dp=[]
         for pair in pairs:
             dp.append(vectors[pair[0]] @ vectors[pair[1]]) # @ is python for dot product 
-        logger.debug ("Dot products by pair")
+        logger.log (5,"Dot products by pair")
 
         # make a histogram to count the times each edge is a near perpendicular
         # the one with 2 will be the crossing edge
         hist={0:0,1:0,2:0}
         for pr,d in zip(pairs,dp):
-            logger.debug (f"{pr},{d}")
-            if abs(d)<.14: # tolerance determined empirically. 
+            logger.log (5,f"{pr},{d}")
+            if abs(d)<.14: # tolerance determined empirically. I think it has to do with how tight the curve is.
                 for edge_set_ix in pr:
                     hist[edge_set_ix]+=1
-        logger.debug(hist)
+        logger.log(5,hist)
         for edge_set_ix,cnt in hist.items():
             if cnt==2:
-                to_remove_ix=edges[edge_set_ix]
-                edges_to_select.remove(to_remove_ix)
-                # other side of crossing can be removed to prevent doing it again on the other side
-                edge=bm.edges[to_remove_ix]
+                crossing_edge_ix=edge_ixs[edge_set_ix]
+                crossing_edges.add(bm.edges[crossing_edge_ix])
+                logger.debug(f"Edge set item {edge_set_ix} with index {crossing_edge_ix} found.")
+
+                # vertex at other side of crossing can be ignored to prevent doing it again on the other side
+                edge=bm.edges[crossing_edge_ix]
                 for v in edge.verts: # might as well add both sides to the ignore list
                     ignore_vix.append(v.index)
-                logger.debug(f"Edge set item {edge_set_ix} with index {to_remove_ix} removed.")
 
-    to_bevel=[bm.edges[ix]for ix in edges_to_select]
-    bmesh.ops.bevel(bm, geom=to_bevel,offset=0.1875 * SCALE,affect='EDGES')
+    return crossing_edges
+
+
+def typed_edges_for_vert(bm,vix:int):
+    """For a vertex on the top, return lists of top edges: perpish, colinearish, neither
+    bm is a bmesh that includes the vertex whose index is vix.
+    requires SCALE, logging and logger
+    """
+    logger.setLevel(logging.DEBUG)
+
+    colinear_ish=[]
+    perp_ish=[]
+    neither=[]
+    edges=bm.verts[vix].link_edges
+    shared_co=(bm.verts[vix].co /SCALE).freeze()
+    vectors=[]
+    edge_indexes=[]
+    logger.debug("Edges")
+    for edge in edges: # convert the edges to vectors
+        # remove the common point all are direction from (0,0,0)
+        both_cos=[(v.co / SCALE).freeze() for v in edge.verts] 
+        if 0 in [c.z for c in both_cos]:
+            logger.debug("skipping 0")
+            continue                   
+        edge_indexes.append(edge.index)
+        length=dist(both_cos[0],both_cos[1])# used to scale to get unit vectors
+        logger.debug(f"{edge.index}: {both_cos} length {length}")
+        other_co=list(set(both_cos)-{shared_co})[0] # the coordinates of the non-common point
+        vector=other_co-shared_co # center at (0,0,0)
+        vector=vector /length # unit vector needed so dot product works right            
+        vectors.append(vector)
+    logger.debug("Vectors with index and (edge index)")
+    n=len(vectors)
+    for ix,(eix,v) in enumerate(zip(edge_indexes,vectors)):
+        logger.debug(f"{ix}. ({eix}) {v}")
+    pairs=tuple(combinations(range(n),2)) # the possible pairings
+    dps=[]
+    for pair in pairs:
+        dps.append(vectors[pair[0]] @ vectors[pair[1]]) # @ is python for dot product 
+    
+    logger.debug ("Dot products by pairs of vector indexes")
+
+    # make a histogram to count the times each edge is a near perpendicular 
+    # the ones (normally one) with 2 will be the common perpendicular to those edges
+    counts=[0]*n
+    hist=dict(zip(range(n),counts)) 
+    for pr,dp in zip(pairs,dps):
+        dp=round(dp,6) # to round off excess over/under 1/-1 which causes acos domain error
+        dg=degrees(acos(dp))
+        logger.debug (f"{pr},{dp} or {dg} degrees")
+        dp=abs(dp)
+        if dp < TOL_PERPENDICULAR: 
+            for vector_ix in pr:
+                hist[vector_ix]+=1
+    logger.debug("Histogram")            
+    logger.debug(hist)
+    for vector_ix, cnt in hist.items():
+        edge_ix=edge_indexes[vector_ix]
+        if cnt==2:
+            perp_ish.append(edge_ix)
+            logger.debug(f"Edge set item {vector_ix} with index {edge_ix} is near perpendicular.")
+    logger.debug(perp_ish)
+    match len(perp_ish):
+        case 0: # there are no edges with 2 perpendiculars.  This could be a corner
+            for vector_ix in range(n):
+                eix=edge_indexes[vector_ix]
+                colinear_ish.append(eix)
+                logger.debug(f"Edge set item {vector_ix} with index {eix} is near colinear.")
+            
+        case 1: # typically an edge, but it can be a cross piece with a perpendicular rail
+            # examine the pairs that the perpendicuar participates in
+            for pr,dp in zip(pairs,dps):
+                eix= set([edge_indexes[vi]for vi in pr])
+                #logger.debug(f"{eix}, {dp}")
+                if perp_ish[0] not in eix:
+                    continue
+                eix.remove(perp_ish[0]) # the other index
+                eix=eix.pop()
+                #logger.debug(f"{dp} < {tol_perpendicular}")
+                if dp < TOL_PERPENDICULAR:
+                    colinear_ish.append(eix)
+                    logger.debug(f"Edge set item {vector_ix} with index {eix} is near colinear.")
+                else:
+                    neither.append(eix)
+                    logger.debug(f"Edge set item {vector_ix} with index {eix} is near neither perpendicular nor colinear.")
+                        
+            pass
+        case _: # a 4 way cross should generate 4 edges that have 2 perpendiculars
+            # also seen when there is a shorter and longer version of the edge both attached to the same 2 boundary edges at the same vertex.
+            # in this case the two     
+            co=bm.verts[vix].co / SCALE        
+            logger.debug(f"Excess perpendiculars. {len(perp_ish)} found at {co}")
+            for p in perp_ish:
+                logger.debug(f"  {[v.co/SCALE for v in bm.edges[p].verts]}")        
+    
+    return perp_ish, colinear_ish, neither
+
+def typed_edges_for_vert_relative(bm,vix:int,reix:int,logging_level=logging.INFO):
+    """For a vertex on the top, return lists of top edges classified relative to the given edge
+    bm is a bmesh that includes the vertex whose index is vix and the edge index reix
+    returns 3 lists of edge indexes: perpish, colinearish, neither
+    """
+    logger.setLevel(logging_level)
+    relative_edge=bm.edges[reix]
+    assert vix in [v.index for v in relative_edge.verts],'Oops vertex is not in the relative edge'
+    colinear_ish=[]
+    perp_ish=[]
+    neither=[]
+    edges=bm.verts[vix].link_edges
+    shared_co=(bm.verts[vix].co /SCALE).freeze()
+    vectors=[]
+    edge_indexes=[]
+    relative_flag=[]
+    logger.debug("Edges")
+    for edge in edges: # convert the edges to vectors
+        # remove the common point all are direction from (0,0,0)
+        both_cos=[(v.co / SCALE).freeze() for v in edge.verts] 
+        if 0 in [c.z for c in both_cos]:
+            logger.debug("skipping 0")
+            continue                   
+        edge_indexes.append(edge.index)
+        length=dist(both_cos[0],both_cos[1])# used to scale to get unit vectors
+        logger.debug(f"{edge.index}: {both_cos} length {length}")
+        other_co=list(set(both_cos)-{shared_co})[0] # the coordinates of the non-common point
+        vector=other_co-shared_co # center at (0,0,0)
+        vector=vector /length # unit vector needed so dot product works right            
+        vectors.append(vector)
+        relative_flag.append(reix==edge.index)
+    logger.debug("Vectors with index and (edge index) and relative flag")
+    n=len(vectors)
+    rvx=None # index in vectors of the relative edge
+    for ix,(eix,v,rf) in enumerate(zip(edge_indexes,vectors,relative_flag)):
+        logger.debug(f"{ix}. ({eix}) {v} {rf}")
+        if rf:
+            rvx=ix 
+    assert rvx is not None,"Oops no relative vector index"
+    pairs=tuple(zip(([rvx]*n),range(n))) # compare relative edge to each edge (including self)
+    dps=[]
+    for pair in pairs:
+        dps.append(vectors[pair[0]] @ vectors[pair[1]]) # @ is python for dot product 
+    
+    # hack to eliminate problem seen on incline where there is an extra near colinear edge with
+    s=sum([dp > .99999 for dp in dps])
+    if s>1:
+        sel=[(dp > .99999)and (dp<.999999) for dp in dps]
+        if any(sel):
+            logger.debug(f"Removed very near pair {pairs[sel.index(True)]}")
+            sel=[not s for s in sel]
+            pairs=list(compress(pairs,sel))
+            dps=list(compress(dps,sel))
+
+
+    logger.debug ("Dot products by pairs of vector indexes")
+    for pr,dp in zip(pairs,dps):
+        dp=round(dp,6) # to round off excess over/under 1/-1 which causes acos domain error
+        dg=degrees(acos(dp))
+        logger.debug (f"{pr},{dp} or {dg} degrees")
+        dp=abs(dp)
+        vector_ix=pr[1]
+        edge_ix=edge_indexes[vector_ix]
+        if dp < TOL_PERPENDICULAR: 
+            perp_ish.append(edge_ix)
+            logger.debug(f"Edge set item {vector_ix} with index {edge_ix} is near perpendicular.")
+        else: # is it colinear or neither?
+            if dp > TOL_COLINEAR:
+                colinear_ish.append(edge_ix)
+                logger.debug(f"Edge set item {vector_ix} with index {edge_ix} is near colinear.")
+            else:
+                neither.append(edge_ix)
+                logger.debug(f"Edge set item {vector_ix} with index {edge_ix} is near neither perpendicular nor colinear.")
+
+    return perp_ish, colinear_ish, neither
+
+
+def test_typed_edges_for_vert():
+    obj=bpy.data.objects["XTRKCAD3_curve_.001"]
+    bm=bmesh.from_edit_mesh(obj.data)
+    vix=None
+    for v in bm.verts:
+        vix=v.index
+        if v.select==True:
+            break
+    if vix:
+        a,b,c= typed_edges_for_vert(bm,vix)
+    print(a)
+    print(b)
+    print(c)
+
+
+
+def bot_edges_from_face(face):
+    """Returns the edges of a face that have z=0 on both vertices"""
+    bot_edges=set()
+    for edge in face.edges:
+        nz=[0==v.co.z for v in edge.verts]
+        if all(nz):
+            bot_edges.add(edge)
+    return bot_edges
+
+def top_edges_from_face(face):
+    """Gets the top edges from a vertical face
+    """
+    top_edges=set()
+    for edge in face.edges:
+        nz=[0<v.co.z for v in edge.verts]
+        if all(nz):
+            top_edges.add(edge)
+    return top_edges
+
+def top_edges_from_bm(bm):
+    """Return a subset of bm.edges that do not have z=0 for either vertex"""
+    top_edges=set()
+    for edge in bm.edges:
+        nz=[0<v.co.z for v in edge.verts]
+        if all(nz):
+            top_edges.add(edge)
+    return top_edges
+
+def bevel_edge_sets(tee:dict,frog_points:dict):
+    """Get the bevelable edge sets for the roadbed objects.
+    tee is dict with object name as key with values a list of a top end edges for every end of that object
+    frog_points is a dict with object name as key and a list of shapely points where the frog vertices were created
+    Returns a dict with the object name as key and a set of edge indices specific to that object.
+    """
+    logger.setLevel(logging.DEBUG)
+    bm = bmesh.new()
+    result={}
+    for mesh_name,root_edges_indexes in tee.items():
+        logger.info(f"Building bevel edge set for {mesh_name}")
+        logger.info(f"  Based on {len(root_edges_indexes)} root edges:")
+        dbg_level=logging.INFO
+
+        for rei in root_edges_indexes:
+            logger.debug(f"    {rei}")  
+        frog_pts=[] # they only exist for level meshes
+        if mesh_name in frog_points:  
+            frog_pts=frog_points[mesh_name]
+        obj=bpy.data.objects[mesh_name]
+        me = obj.data
+        bm.from_mesh(me)
+        bm.verts.ensure_lookup_table()
+        bm.edges.ensure_lookup_table()
+        bm.faces.ensure_lookup_table()
+        chain_map={} # key is vertex index, value is chain index
+        for cix,rei in enumerate(root_edges_indexes):
+            co=fmt_coords([v.co/SCALE for v in bm.edges[rei].verts])
+            logger.debug(f"-- Chain {cix} -- starts at {co}")
+            others=root_edges_indexes.copy()
+            others.remove(rei)
+            chain_map=walk_boundary_edges(bm,bm.edges[rei],cix,chain_map,frog_pts,others,logging_level=dbg_level)
+
+        all_boundary_edges=set(chain_map.keys())
+        result[mesh_name]=all_boundary_edges - (set(root_edges_indexes))
+        bm.clear() # ready for next object
+    return result
+
+
+
+
+
+
+def top_end_edges(obj_base_end_points:dict):
+    """Get the edges at the top of the ends roadbed.
+    obj_base_end_points is dict with object name as key and
+    the endpoints of the center lines of that object as a list as the values
+    Returns a dict with the object name as key and a set of edge indices specific to that object.
+    """
+    logger.setLevel(logging.INFO)# TODO remove this line
+    bm = bmesh.new()
+    result={}
+    for mesh_name,base_end_points in obj_base_end_points.items():
+        logger.info(f"Looking for top edges at roadbed ends for {mesh_name}")
+        logger.info(f"  Based on {len(base_end_points)} points:")
+        for co in base_end_points:
+            logger.debug(f"    {co}")    
+
+        obj=bpy.data.objects[mesh_name]
+        me = obj.data
+        bm.from_mesh(me)
+        bm.verts.ensure_lookup_table()
+        bm.edges.ensure_lookup_table()
+        bm.faces.ensure_lookup_table()
+        tee=set()
+        tol=.001
+        points=[Point(co.xy) for co in base_end_points]
+        points=set(points)
+        for face in bm.faces:
+            bot_edges=bot_edges_from_face(face)
+            if len(bot_edges)==1:
+                bot_edge=bot_edges.pop()
+                (a,b)=[v.co.xy / SCALE for v in bot_edge.verts]
+                line1=LineString([a,b])
+                for co in list(points):
+                    if not dwithin(line1,co,tol):
+                        continue
+                    logger.debug(f"Point {co} found within {tol} of {line1}")
+                    points.remove(co)
+                    edges=top_edges_from_face(face)
+                    for edge in edges: # one for level, two for inclined
+                        (a,b)=[v.co.xy/SCALE for v in edge.verts]
+                        line2=LineString([a,b])
+                        if dwithin(line2,co,tol):
+                            logger.debug(f"  Edge {edge.index}: {(a,b)}")
+                            tee.add(edge.index)
+
+        # some of the inclined items have only one of the two root edges, so add the other one
+        debugpy.breakpoint()
+        pass
+        to_add=set()
+        for tei in tee:
+            edge=bm.edges[tei]
+            for vert in edge.verts:
+                _,colin,_=typed_edges_for_vert_relative(bm,vert.index,tei)
+                print(colin)
+                colin.remove(tei)
+                for ex in colin:
+                    to_add.add(ex)
+        for ex in to_add:
+            tee.add(ex)
+            logger.debug(f"Added edge {ex} to tee")
+
+
+        result[mesh_name]=tee
+        logger.info(f"  Found {len(tee)}. {len(points)} points were not consumed")
+        if len(points):
+            for co in points:
+                logger.debug(f"  {co}")
+        bm.clear() # clear out this objects bm, ready to load next one
+    return result
+
+
+
+def fix_frogs(layer_mesh_map):
+    """For objects in the "level" layer, ensure frog junction the lines that pass through frog point have a vertex there.
+    As it comes, the diverging line end point is near the edge of the other side, 
+    but there is no vertex, so the boundary edges actually go into the solid.
+    Returns dict: key=mesh_name, list of 2d shapely Points which were created.
+    Call after the solidify step.
+    """
+    bm = bmesh.new()
+    result={}
+    for mesh_name in layer_mesh_map["level"]:
+
+        logger.info(f"Finding frogs for {mesh_name}")
+        obj=bpy.data.objects[mesh_name]
+        me = obj.data
+        bm.from_mesh(me)
+        bm.verts.ensure_lookup_table()
+        bm.edges.ensure_lookup_table()
+
+        top_edges=top_edges_from_bm(bm)
+        crossings=find_crossing_edges(bm,top_edges)
+        net_top_edges=top_edges - crossings
+
+        logger.debug(f"{len(top_edges)} top edges in {obj.name}")
+        logger.debug(f"{len(crossings)} crossings in {obj.name}")
+        logger.debug(f"{len(net_top_edges)} net top edges (after removing crossings)")
+
+        created_points=[]
+        # check each combination to see if it has an intersection
+        for (e,f) in combinations(net_top_edges,2):
+            # but disallow if already share a common vertex
+            le=links_to_edge(e)
+            lf=links_to_edge(f)
+
+            if f.index in le:
+                continue
+            # pairs of vectors that define each line segment             
+            (a,b)=[v.co.xy / SCALE for v in e.verts]
+            (c,d)=[v.co.xy / SCALE for v in f.verts]
+            line1=LineString([a,b])
+            line2=LineString([c,d])
+            if line1.intersects(line2):
+                point=line1.intersection(line2)
+                logger.debug(f"Edges {e.index}: ({a.x:.6f}, {a.y:.6f}) - ({b.x:.6f}, {b.y:.6f}), links: {le}")
+                logger.debug(f"  AND {f.index}: ({c.x:.6f}, {c.y:.6f}) - ({d.x:.6f}, {d.y:.6f}), links: {lf}")
+                logger.debug(f"   AT {point}")
+
+                e_vert=e.verts[0]
+                f_vert=f.verts[0]
+                e_fac=dist(e_vert.co.xy/SCALE,(point.x,point.y))/dist(a,b)
+                f_fac=dist(f_vert.co.xy/SCALE,(point.x,point.y))/dist(c,d)
+                bmesh.utils.edge_split(e, e_vert, e_fac)
+                bmesh.utils.edge_split(f, f_vert, f_fac)
+                created_points.append(point)
+                logger.info(f"Split two lines at {point}")
+        bm.to_mesh(me)
+        me.update()
+        bm.clear()
+        result[mesh_name]=created_points
+    
+    bm.free()
+    return result
+
+def show_edges(obj_name,edge_index_set):
+    """ Diagnostic to show the edge set visually.  Selects the edges and exits
+    Although it does not set the crossing edges as selected, it looks like it does in the view.
+    This seems to be because each edge selection also selects the vertices and the view automatically 
+    creates the selection when two vertices of an edge are selected.  These do not get done when
+    the selection is consumed by the bevel operation.
+    """
+    bpy.ops.object.select_all(action='DESELECT')
+    obj=bpy.data.objects[obj_name]
+    obj.select_set(True)
+    me = obj.data
+    bm=bmesh.new()
+    bm.from_mesh(me)
+    bm.verts.ensure_lookup_table()
+    bm.edges.ensure_lookup_table()
+    bm.select_flush(True) # probably not needed.
+    bm.select_mode={"EDGE"}
+    
+
+    logger.debug(f"Showing {len(edge_index_set)} edges")
+    for edge in bm.edges:
+        edge.select=False
+    for eix in edge_index_set:
+        edge=bm.edges[eix]
+        # edge.select_set(True)
+        edge.select=True
+    cnt=0
+    for edge in bm.edges:
+        if edge.select:
+            cnt+=1
+    logger.debug(f"Selection is {cnt} edges")
+    
+    cnt=0
+    for vert in bm.verts:
+        if vert.select:
+            cnt+=1
+    logger.debug(f"Selection is {cnt} verts")
+   
+
     bm.to_mesh(me)
     me.update()
     bm.clear()
 
     bm.free()
+    bpy.ops.object.mode_set(mode='EDIT')
+    bpy.ops.mesh.select_mode(type='EDGE')
+    #bpy.ops.view3d.view_selected(use_all_regions=False)
+    raise KeyboardInterrupt()
+
+
+def bevel(obj,edge_index_set):
+    """ Bevel the top outside edges
+    The edge set is derived by the caller.  This just does the bevel.
+    """
+    logger.info(f"Beveling {obj.name}")
+    bpy.ops
+    bpy.ops.object.select_all(action='DESELECT')
+    obj.select_set(True)
+
+    me = obj.data
+    bm=bmesh.new()
+    bm.from_mesh(me)
+    bm.verts.ensure_lookup_table()
+    bm.edges.ensure_lookup_table()
+    edges_to_select=list(edge_index_set)
+    to_bevel=[bm.edges[ix]for ix in edges_to_select]
+    bmesh.ops.bevel(bm, geom=to_bevel,offset=BEVEL * SCALE,affect='EDGES')
+    logger.info(f"  Bevel operation run with {len(edge_index_set)} edges")
+    bm.to_mesh(me)
+    me.update()
+    bm.clear()
+
+    bm.free()
+
 
 def create_bezier(control_points: list):
     """Set up a bezier curve
@@ -592,7 +1064,8 @@ def create_bezier(control_points: list):
     return curve_name
 
 def solidify_roadbed():
-    """Solidfy the roadbed sections.  Expect panels are up. """
+    """Solidfy the roadbed sections.  Expect panels are up. 
+    """
     bed_sections=[]
     logger.info ("Roadbed sections will be: ")    
     for obj in bpy.data.objects:
@@ -605,7 +1078,7 @@ def solidify_roadbed():
             bpy.ops.object.modifier_add(type='SOLIDIFY')
             bpy.context.object.modifiers["Solidify"].solidify_mode="NON_MANIFOLD" # i.e. complex
             bpy.context.object.modifiers["Solidify"].nonmanifold_thickness_mode="FIXED"
-            bpy.context.object.modifiers["Solidify"].thickness = .9375* SCALE
+            bpy.context.object.modifiers["Solidify"].thickness = ROADBED_WIDTH* SCALE
             bpy.context.object.modifiers["Solidify"].offset = 0
             bpy.ops.object.modifier_apply(modifier="Solidify")
 
@@ -799,14 +1272,16 @@ class IMPORT_xtc(bpy.types.Operator):
         import_dxf_file(DATA_FOLDER+"revised.dxf")
 
         convert_to_meshes()
-
         merge_near_vertices()
+
+
 
         layer_mesh_map=split_xtc_layers()
 
         end_point_map=end_points()
 
         bevel_info=panels_up_for_layer("level",layer_mesh_map,elevations,end_point_map)
+
         bi=panels_up_for_layer("inclined",layer_mesh_map,elevations,end_point_map)
         bevel_info.update(bi)
 
@@ -823,6 +1298,8 @@ class IMPORT_xtc(bpy.types.Operator):
         solidify_trimmers(trimmer_map)
 
         # do the trim and discard the trim tools
+        # this has the side effect of creating a vertex at the center of the top end edge
+        # of the inclined roadbed.
         for mesh_name,trimmer in trimmer_map.items():
             obj=bpy.data.objects[mesh_name]
             logger.info(f"Trimming {obj.name} using trimmer: {trimmer}")
@@ -838,14 +1315,21 @@ class IMPORT_xtc(bpy.types.Operator):
             delete_objects_by_name([trimmer])             
 
 
-    
+        frog_points=fix_frogs(layer_mesh_map)
+        tee=top_end_edges(bevel_info)
+        pprint(tee)
+        bes=bevel_edge_sets(tee,frog_points)
+        # obj="XTRKCAD17_curve_.001"
+        # show_edges(obj,bes[obj])
+        # raise KeyboardInterrupt()
+
         # do the bevels
-        for name,info in bevel_info.items():
+        for name,edge_indexes in bes.items():
             logger.info(f"Beveling {name}")
             obj=bpy.data.objects[name]
-            bevel(obj,info)
+            bevel(obj,edge_indexes)
               
-        add_base()
+        #add_base()
         
         pass
 
