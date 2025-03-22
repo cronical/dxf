@@ -1,0 +1,11 @@
+#!/bin/zsh
+# deploy the foam script and either run it with $1 as the arg
+
+script="/Users/george/Library/Application Support/Blender/4.3/scripts/addons/xtc3d/foam.py"
+file="/Users/george/argus/blender_scripts/addons/dxf/data/full_model.blend"
+
+cp ./b_script.py /Users/george/Library/Application\ Support/Blender/4.3/scripts/addons/b_script.py
+cp -R ./xtc3d/ /Users/george/Library/Application\ Support/Blender/4.3/scripts/addons/xtc3d
+
+/Applications/Blender.app/Contents/MacOS/Blender $file -b --python $script -- $1
+

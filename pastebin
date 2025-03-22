@@ -8,3 +8,19 @@ for edge in bm.edges:
         cnt=cnt+1
         
 print(cnt)
+
+# https://en.wikipedia.org/wiki/Bounding_volume_hierarchy
+# functions from https://blender.stackexchange.com/questions/9073/how-to-check-if-two-meshes-intersect-in-python
+# def create_bvh_tree_from_object(obj):
+#     bm = bmesh.new()
+#     bm.from_mesh(obj.data)
+#     bm.transform(obj.matrix_world)
+#     bvh = BVHTree.FromBMesh(bm)
+#     bm.free()
+#     return bvh
+
+
+# def check_bvh_intersection(obj_1, obj_2):
+#     bvh1 = create_bvh_tree_from_object(obj_1)
+#     bvh2 = create_bvh_tree_from_object(obj_2)
+#     return bvh1.overlap(bvh2)

@@ -1,0 +1,72 @@
+# Configuration file for xtrack to blender script
+
+
+source = "/Users/george/track_plans/nmra-wimrr-2-flat.xtc"
+
+[data]
+folder= "/Users/george/argus/blender_scripts/addons/dxf/data/"
+elevations = "elevations.csv"
+subset = "full.dxf"
+center_line = "revised.dxf"
+blend = "full_model.blend"
+
+[layers]
+level = 3
+inclined = 17
+foam = 14
+
+[dimensions]
+scale = 0.0254 # work in inches
+bevel = 0.1875 # bevel is 3/16s
+scene_height = 0.625 # thickness of the base.
+roadbed_width= 1.625 # at bottom bed is 1" 5/8 
+# full width references:
+# 33mm * 0.03937 # 33MM convert to inches.ref: https://www.greenstuffworld.com/18124-large_default/h0-cork-roadbed.jpg
+# 1.75" ref: https://midwestmodelrr.com/mid3013/ 
+
+[tolerances] 
+# in degrees how far from 90 or 0 is allowed (for edge detection)
+perpendicular = 86
+colinear = 4
+
+# define attributes of the foam panels.
+# this is a list of dictionaries
+# dimensions come from the .xtc file
+# the part_no is the part_no in xtrkcad and is used to name the output file
+# height is the depth of the foam stock
+# source is plan for which piece of foam stock this comes from.
+
+[[work_pieces]]
+part_no = 108
+height = 1.0
+source = "B"
+
+[[work_pieces]]
+part_no = 254
+height = 2.0 
+source = "A"
+
+[[work_pieces]]
+part_no = 256
+height = 1.0
+source = "C"
+
+[[work_pieces]]
+part_no = 109
+height = 1.0
+source = "C"
+
+[[work_pieces]]
+part_no = 1
+height = 2.0
+source = "A"
+
+[[work_pieces]]
+part_no = 253
+height = 1.0
+source = "B"
+
+[[work_pieces]]
+part_no = 258
+height = 1.0
+source = "C"

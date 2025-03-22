@@ -6,6 +6,7 @@ if [[ $1 = "-d" ]] ; then
 script="./start_dbg.py" ;
 fi
 cp ./b_script.py /Users/george/Library/Application\ Support/Blender/4.3/scripts/addons/b_script.py
+cp -R ./xtc3d/ /Users/george/Library/Application\ Support/Blender/4.3/scripts/addons/xtc3d
 
 /Applications/Blender.app/Contents/MacOS/Blender --python $script
 
